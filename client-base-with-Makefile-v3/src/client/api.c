@@ -31,6 +31,9 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
   }
   
   //2. Preparar estrutura de dados para pedido de conexão
+  strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
+  strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
+
   char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
   memset(connect_req_buffer, 0, sizeof(connect_req_buffer));
 
@@ -130,12 +133,13 @@ Board receive_board_update(void) {
   // 1. Ler a atualização do tabuleiro do pipe de notificações
   if (read(session.fd_notif_pipe, &buffer1, sizeof(buffer1)) == -1) {
       debug("Failed to read board update from server\n");
+      return board;
   }
 
   // 2. Processar a atualização do tabuleiro
   if (buffer1[0] != OP_CODE_BOARD) {
       debug("Invalid op_code in board update\n");
-      return;
+      return board;
   }
   memcpy(&board.width, &buffer1[1], sizeof(int));
   memcpy(&board.height, &buffer1[1 + sizeof(int)], sizeof(int));
@@ -144,18 +148,18 @@ Board receive_board_update(void) {
   memcpy(&board.game_over, &buffer1[1 + 4*sizeof(int)], sizeof(int));
   memcpy(&board.accumulated_points, &buffer1[1 + 5*sizeof(int)], sizeof(int));
 
-  char *data_buffer = (char *)malloc(board.width * board.height * sizeof(char));
-  if (data_buffer == NULL) {
+  // 3. Alocar memória para os dados do tabuleiro
+  board.data = (char*)malloc(board.width * board.height * sizeof(char));
+  if (!board.data) {
       debug("Failed to allocate memory for board data\n");
-      return;
+      return board;
   }
-  if (read(session.fd_notif_pipe, data_buffer, board.width * board.height * sizeof(char)) == -1) {
+  
+  // 4. Ler os dados do tabuleiro do pipe de notificações
+  if (read(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
       debug("Failed to read board data from server\n");
-      free(data_buffer);
-      return;
+      return board;
   }
-  memcpy(board.data, data_buffer, board.width * board.height * sizeof(char));
-  free(data_buffer);
 
   return board;
 }
