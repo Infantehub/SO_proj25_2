@@ -1,7 +1,6 @@
-#include "api.h"
-#include "protocol.h"
-#include "display.h"
-#include "debug.h"
+#include "../../include/display.h"
+#include "../../include/protocol.h"
+#include "../../include/debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +51,7 @@ int main(int argc, char *argv[]) {
     }
 
     const char *client_id = argv[1];
-    const char *register_pipe = argv[2];
+    const char *register_pipe = "~/tmp/pacman_server_fifo";//argv[2]; só para teste
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
     FILE *cmd_fp = NULL;
@@ -94,9 +93,10 @@ int main(int argc, char *argv[]) {
     while (1) {
 
         pthread_mutex_lock(&mutex);
-        if (stop_execution)
+        if (stop_execution){
             pthread_mutex_unlock(&mutex);
             break;
+        }
         pthread_mutex_unlock(&mutex);
 
         if (cmd_fp) {

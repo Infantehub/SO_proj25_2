@@ -1,6 +1,6 @@
-#include "api.h"
-#include "protocol.h"
-#include "debug.h"
+#include "../../include/api.h"
+#include "../../include/protocol.h"
+#include "../../include/debug.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -25,9 +25,14 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
   debug("Connecting to server...\n");
 
   // 1. Criar os pipes do cliente
-  if (mkfifo(req_pipe_path, 0666) == -1 || mkfifo(notif_pipe_path, 0666) == -1) {
-      debug("Failed to create client FIFOs\n");
+  if (mkfifo(req_pipe_path, 0666) == -1 ) {
+      debug("Failed to create client request FIFO\n");
       return 1;
+  }
+  if (mkfifo(notif_pipe_path, 0666) == -1 ) {
+    debug("Failed to create client notification FIFO\n");
+    unlink(req_pipe_path);
+    return 1;
   }
   
   //2. Preparar estrutura de dados para pedido de conexão

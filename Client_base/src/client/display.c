@@ -1,6 +1,5 @@
-#include "display.h"
-#include "board.h"
-#include "api.h"
+#include "../../include/display.h"
+#include "../../include/api.h"
 #include <stdlib.h>
 #include <ctype.h>
 
