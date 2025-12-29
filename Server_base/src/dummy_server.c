@@ -20,7 +20,6 @@ int main() {
     read(fd, &req, sizeof(req));
     
     printf("Recebi pedido!\nPipe Pedidos: %s\nPipe Notif: %s\n", req.req_pipe, req.notif_pipe);
-    close(fd);
 
     // 4. Envia resposta de SUCESSO
     int fd_cli_notif = open(req.notif_pipe, O_WRONLY);

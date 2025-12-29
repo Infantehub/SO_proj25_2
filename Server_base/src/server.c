@@ -9,6 +9,7 @@
 #include <errno.h>
 
 #include "../include/protocol.h"
+#include "../include/debug.h"
 
 typedef struct {
     int active;           // Flag para parar as threads
@@ -121,7 +122,7 @@ int process_command(GameSession *session, char command) {
 
     char target_content = session->grid[new_y * session->width + new_x];
     
-    if (target_content == '@'){
+    if (target_content == '@'){ //FIXME: 'P' portal?
         //FIXME: session->victory = 1; victory funciona quando acaba o nível ou todos os níveis?
         return REACHED_PORTAL;
     }
@@ -133,7 +134,7 @@ int process_command(GameSession *session, char command) {
         session->game_over = 1;
         return DEAD_PACMAN;
     }
-    if (target_content == '.'){
+    if (target_content == ' '){
         session->score += 1; 
         session->grid[session->pacman_y * session->width + session->pacman_x] = ' '; // come um ponto
         session->pacman_x = new_x;
@@ -170,6 +171,7 @@ void* input_handler_thread(void* arg){
     }
     return NULL;
 }
+
 void send_board_to_client(GameSession *session) {
     int header_size = 1 + 6 * sizeof(int); // OP + 6 inteiros
     int board_size = session->width * session->height;
@@ -221,7 +223,8 @@ int main(int argc, char *argv[]) {
     }
 
     // 1. Cria o pipe do servidor
-    char server_fifo[MAX_PIPE_PATH_LENGTH] = "/pacman_server_fifo";
+    char server_fifo[MAX_PIPE_PATH_LENGTH];
+    strncpy(server_fifo, argv[3], MAX_PIPE_PATH_LENGTH);
     mkfifo(server_fifo, 0666);
 
     // 2. Abre para leitura
@@ -245,30 +248,32 @@ int main(int argc, char *argv[]) {
     char opcode = connectbuf[0];
     if (opcode == OP_CODE_CONNECT && n==83){
         // 4. Inicializa sessão de jogo
+        debug("Client connected\n");
         GameSession game;
         memset(&game, 0, sizeof(game));
         game.active = 1;
         pthread_mutex_init(&game.lock, NULL);
 
-        // 5. Abrir pipes do cliente, por ordem que são criados!
+        // 5. Abrir pipes do cliente, por ordem que são abertos no api.c
         char req_path[MAX_PIPE_PATH_LENGTH], notif_path[MAX_PIPE_PATH_LENGTH];
         memcpy(req_path, connectbuf + 1, MAX_PIPE_PATH_LENGTH);
         memcpy(notif_path, connectbuf + 1 + MAX_PIPE_PATH_LENGTH, MAX_PIPE_PATH_LENGTH);
 
-        game.fd_req = open(req_path, O_RDONLY);
-        if (game.fd_req == -1) {
+        game.fd_notif = open(notif_path, O_WRONLY);
+        if (game.fd_notif == -1) {
             debug("Failed to open client request FIFO\n");
             close(fd);
             return 1;
         }
 
-        game.fd_notif = open(notif_path, O_WRONLY);
-        if (game.fd_notif == -1) {
+        game.fd_req = open(req_path, O_RDONLY);
+        if (game.fd_req == -1) {
             debug("Failed to open client notification FIFO\n");
-            close(game.fd_req);
+            close(game.fd_notif);
             close(fd);
             return 1;
         }
+        debug("Client FIFOs opened\n");
 
 
         // 6. Enviar Ack de conexão
@@ -281,6 +286,7 @@ int main(int argc, char *argv[]) {
             close(fd);
             return 1;
         }
+        debug("Connection ACK sent to client\n");
 
         // 7. Inicializar Jogo
         init_game(&game); // TODO: Função fictícia para inicializar o jogo

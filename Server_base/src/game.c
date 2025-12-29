@@ -310,5 +310,4 @@ void* ghost_thread(void *arg) {
         return 0;
     }
     return 0;
-}
-*/
+}*/

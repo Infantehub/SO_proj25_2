@@ -51,7 +51,8 @@ int main(int argc, char *argv[]) {
     }
 
     const char *client_id = argv[1];
-    const char *register_pipe = "~/tmp/pacman_server_fifo";//argv[2]; só para teste
+    char register_pipe[MAX_PIPE_PATH_LENGTH];
+    strncpy(register_pipe, argv[2], MAX_PIPE_PATH_LENGTH);
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
     FILE *cmd_fp = NULL;

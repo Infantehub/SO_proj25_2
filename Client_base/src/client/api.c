@@ -21,70 +21,85 @@ struct Session {
 static struct Session session = {.op_code = -1};
 
 int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char const *server_pipe_path) {
-  open_debug_file("client-api-debug.log");
-  debug("Connecting to server...\n");
+    open_debug_file("client-api-debug.log");
+    debug("Connecting to server...\n");
 
-  // 1. Criar os pipes do cliente
-  if (mkfifo(req_pipe_path, 0666) == -1 ) {
-      debug("Failed to create client request FIFO\n");
-      return 1;
-  }
-  if (mkfifo(notif_pipe_path, 0666) == -1 ) {
-    debug("Failed to create client notification FIFO\n");
-    unlink(req_pipe_path);
-    return 1;
-  }
+    // 1. Criar os pipes do cliente
+    if (mkfifo(req_pipe_path, 0666) == -1 ) {
+        debug("Failed to create client request FIFO\n");
+        return 1;
+    }
+    if (mkfifo(notif_pipe_path, 0666) == -1 ) {
+        debug("Failed to create client notification FIFO\n");
+        unlink(req_pipe_path);
+        return 1;
+    }
   
-  //2. Preparar estrutura de dados para pedido de conexão
-  strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
-  strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
+    debug("Client FIFOs created: %s, %s\n", req_pipe_path, notif_pipe_path);
 
-  char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
-  memset(connect_req_buffer, 0, sizeof(connect_req_buffer));
+    //2. Preparar estrutura de dados para pedido de conexão
+   strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
+    strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
 
-  connect_req_buffer[0] = OP_CODE_CONNECT;
-  strncpy(&connect_req_buffer[1], req_pipe_path, MAX_PIPE_PATH_LENGTH);
-  strncpy(&connect_req_buffer[1 + MAX_PIPE_PATH_LENGTH], notif_pipe_path, MAX_PIPE_PATH_LENGTH);
+    char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
+    memset(connect_req_buffer, 0, sizeof(connect_req_buffer));
 
-  // 3. Abrir o FIFO para pedido de conexão ao servidor
-  int fd_server = open(server_pipe_path, O_WRONLY);
-  if (fd_server == -1) {
-      debug("Failed to open server FIFO\n");
-      return 1;
-  }
+    connect_req_buffer[0] = OP_CODE_CONNECT;
+    strncpy(&connect_req_buffer[1], req_pipe_path, MAX_PIPE_PATH_LENGTH);
+    strncpy(&connect_req_buffer[1 + MAX_PIPE_PATH_LENGTH], notif_pipe_path, MAX_PIPE_PATH_LENGTH);
 
-  // 4. Enviar pedido de conexão
-  if (write(fd_server, &connect_req_buffer, sizeof(connect_req_buffer)) == -1) {
-      debug("Failed to write connection request to server\n");
-      return 1;
-  }
+    // 3. Abrir o FIFO para pedido de conexão ao servidor
+    int fd_server = open(server_pipe_path, O_WRONLY);
+    if (fd_server == -1) {
+        debug("Failed to open server FIFO\n");
+        return 1;
+    }
 
-  //5. Fechar o pipe do servidor, já que não é mais necessário
-  if (close(fd_server) == -1) {
-      debug("Failed to close server FIFO\n");
-      return 1;
-  }
+    // 4. Enviar pedido de conexão
+    if (write(fd_server, &connect_req_buffer, sizeof(connect_req_buffer)) == -1) {
+        debug("Failed to write connection request to server\n");
+        return 1;
+    }
+    debug("Connection request sent to server\n");
 
-  // 6. Abrir o pipe de notificações do Servidor
-  session.fd_notif_pipe = open(notif_pipe_path, O_RDONLY);
+    //5. Fechar o pipe do servidor, já que não é mais necessário
+    if (close(fd_server) == -1) {
+        debug("Failed to close server FIFO\n");
+        return 1;
+    }
 
-  if (session.fd_notif_pipe == -1) {
-      debug("Failed to open notification FIFO\n");
-      return 1;
-  }
+    // 6. Abrir o pipe de notificações e requests sincronizado com o Servidor
+    session.fd_notif_pipe = open(notif_pipe_path, O_RDONLY);
+    session.fd_req_pipe = open(session.req_pipe_path, O_WRONLY);
 
-  // 7. Ler a resposta de conexão
-  char connect_resp_buffer[2 * sizeof(char)];
-  memset(connect_resp_buffer, 0, sizeof(connect_resp_buffer));
-  read(session.fd_notif_pipe, &connect_resp_buffer, sizeof(connect_resp_buffer));    
+    if (session.fd_notif_pipe == -1) {
+        debug("Failed to open notification FIFO\n");
+        return 1;
+    }
+    if (session.fd_req_pipe == -1) {
+        debug("Failed to open request FIFO\n");
+        return 1;
+    }
 
-  if (connect_resp_buffer[0] == OP_CODE_CONNECT && connect_resp_buffer[1] == 0) {
-      // 8. Sucesso! Agora abrimos o pipe de pedidos para enviar jogadas futuras
-      session.fd_req_pipe = open(session.req_pipe_path, O_WRONLY);
-      return 0;
-  }
 
-  return 1; // Falha na conexão
+    // 7. Ler a resposta de conexão
+    char connect_resp_buffer[2 * sizeof(char)];
+    memset(connect_resp_buffer, 0, sizeof(connect_resp_buffer));
+
+    if(read(session.fd_notif_pipe, &connect_resp_buffer, sizeof(connect_resp_buffer)) == -1) {
+        debug("Failed to read connection response from server\n");
+        return 1;
+    }
+    debug("Connection response received from server:%s\n", connect_resp_buffer);
+
+    if (connect_resp_buffer[0] == OP_CODE_CONNECT && connect_resp_buffer[1] == 0) {
+        // 8. Sucesso! Agora abrimos o pipe de pedidos para enviar jogadas futuras
+        debug("Connected to server successfully\n");
+        return 0;
+    }
+
+    debug("Connection to server failed\n");
+    return 1; // Falha na conexão
 }
 
 void pacman_play(char command) {
