@@ -1,0 +1,9 @@
+DIM 10 5
+TEMPO 10
+MON ghost_dummy.m
+# Nota: Sem linha PAC, o jogo assume manual (teclado)
+XXXXXXXXXX
+Xooooooo@X
+XooooooooX
+XooooooooX
+XXXXXXXXXX

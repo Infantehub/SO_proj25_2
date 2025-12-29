@@ -446,12 +446,16 @@ void kill_pacman(board_t* board, int pacman_index) {
 }
 
 // Static Loading
-int load_pacman(board_t* board) {
+int load_pacman(board_t* board, GameSession *session, int points) {
     board->board[1 * board->width + 1].content = 'P'; // Pacman
     board->pacmans[0].pos_x = 1;
     board->pacmans[0].pos_y = 1;
     board->pacmans[0].alive = 1;
-    board->pacmans[0].points = 0;
+    board->pacmans[0].points = points;
+
+    session->pacman_x = 1;
+    session->pacman_y = 1;
+    session->score = points;
     return 0;
 }
 
@@ -466,18 +470,16 @@ int load_ghost(board_t* board) {
     return 0;
 }
 
-int load_level(board_t *board, char *filename, char* dirname, int points) {
+int load_level(board_t *board, GameSession *session, char *filename, char* dirname, int acc_points) {
 
-    if (read_level(board, filename, dirname) < 0) {
+    if (read_level(board, session, filename, dirname) < 0) {
         printf("Failed to load level\n");
         return -1;
     }
+    
+    load_pacman(board, session, acc_points);
 
-    if (read_pacman(board, points) < 0) {
-        printf("Failed to load the pacman\n");
-    }
-
-    if (read_ghosts(board) < 0) {
+    if (read_ghosts(board, session) < 0) {
         printf("Failed to read ghosts\n");
     }
 
@@ -487,7 +489,6 @@ int load_level(board_t *board, char *filename, char* dirname, int points) {
         pthread_mutex_init(&board->board[i].lock, NULL);
     }
 
-    //print_board(board);
     return 0;
 }
 

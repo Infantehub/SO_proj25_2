@@ -147,39 +147,39 @@ int pacman_disconnect() {
 }
 
 Board receive_board_update(void) {
-  Board board;
-  char buffer1[sizeof(char) + 6*sizeof(int)];
+    Board board;
+    char buffer1[sizeof(char) + 6*sizeof(int)];
 
-  // 1. Ler a atualização do tabuleiro do pipe de notificações
-  if (read(session.fd_notif_pipe, &buffer1, sizeof(buffer1)) == -1) {
-      debug("Failed to read board update from server\n");
-      return board;
-  }
+    // 1. Ler a atualização do tabuleiro do pipe de notificações
+    if (read(session.fd_notif_pipe, &buffer1, sizeof(buffer1)) == -1) {
+        debug("Failed to read board update from server\n");
+        return board;
+    }
 
-  // 2. Processar a atualização do tabuleiro
-  if (buffer1[0] != OP_CODE_BOARD) {
-      debug("Invalid op_code in board update\n");
-      return board;
-  }
-  memcpy(&board.width, &buffer1[1], sizeof(int));
-  memcpy(&board.height, &buffer1[1 + sizeof(int)], sizeof(int));
-  memcpy(&board.tempo, &buffer1[1 + 2*sizeof(int)], sizeof(int));
-  memcpy(&board.victory, &buffer1[1 + 3*sizeof(int)], sizeof(int));
-  memcpy(&board.game_over, &buffer1[1 + 4*sizeof(int)], sizeof(int));
-  memcpy(&board.accumulated_points, &buffer1[1 + 5*sizeof(int)], sizeof(int));
+   // 2. Processar a atualização do tabuleiro
+    if (buffer1[0] != OP_CODE_BOARD) {
+        debug("Invalid op_code in board update:%d\n", buffer1[0]);
+        return board;
+    }
+    memcpy(&board.width, &buffer1[1], sizeof(int));
+    memcpy(&board.height, &buffer1[1 + sizeof(int)], sizeof(int));
+    memcpy(&board.tempo, &buffer1[1 + 2*sizeof(int)], sizeof(int));
+    memcpy(&board.victory, &buffer1[1 + 3*sizeof(int)], sizeof(int));
+    memcpy(&board.game_over, &buffer1[1 + 4*sizeof(int)], sizeof(int));
+    memcpy(&board.accumulated_points, &buffer1[1 + 5*sizeof(int)], sizeof(int));
 
-  // 3. Alocar memória para os dados do tabuleiro
-  board.data = (char*)malloc(board.width * board.height * sizeof(char));
-  if (!board.data) {
-      debug("Failed to allocate memory for board data\n");
-      return board;
-  }
+    // 3. Alocar memória para os dados do tabuleiro
+    board.data = (char*)malloc(board.width * board.height * sizeof(char));
+    if (!board.data) {
+        debug("Failed to allocate memory for board data\n");
+        return board;
+    }
   
-  // 4. Ler os dados do tabuleiro do pipe de notificações
-  if (read(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
-      debug("Failed to read board data from server\n");
-      return board;
-  }
+    // 4. Ler os dados do tabuleiro do pipe de notificações
+    if (read(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
+        debug("Failed to read board data from server\n");
+        return board;
+    }
 
-  return board;
+    return board;
 }

@@ -63,6 +63,24 @@ typedef struct {
     pthread_rwlock_t state_lock;
 } board_t;
 
+typedef struct {
+    int active;           // Flag para parar as threads
+    int fd_req;           // Ler do cliente
+    int fd_notif;         // Escrever para o cliente
+    
+    // Dados do Jogo
+    pthread_mutex_t lock; // Protege o acesso ao jogo
+    char *grid;           // O array do tabuleiro
+    int width;
+    int height;
+    int pacman_x;
+    int pacman_y;
+    int tempo;
+    int score;
+    int game_over;
+    int victory;
+} GameSession;
+
 /*Move pacman/monster in a certain direction on the board must check for boundaries, walls and other monsters
 Maybe do 1 function for pacman and 1 for monsters if required
 Maybe do 1 function for each direction
@@ -74,7 +92,7 @@ int move_ghost(board_t* board, int ghost_index, command_t* command);
 void kill_pacman(board_t* board, int pacman_index);
 
 /*Adds a pacman to the board from a file*/
-int load_pacman(board_t* board);
+int load_pacman(board_t* board, GameSession *session, int points);
 
 /*Adds a ghost to the board from a file*/
 int load_ghost(board_t* board);
@@ -83,7 +101,7 @@ int load_ghost(board_t* board);
 /*
 Fils the board with the information coming from the file
 */
-int load_level(board_t* board, char* filename, char* dirname, int accumulated_points);
+int load_level(board_t* board, GameSession *session, char* filename, char* dirname, int accumulated_points);
 // Unloads levels loaded by load_level
 void unload_level(board_t * board);
 

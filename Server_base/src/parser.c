@@ -6,7 +6,7 @@
 #include "board.h"
 #include <fcntl.h>
 
-int read_level(board_t* board, char* filename, char* dirname) {
+int read_level(board_t* board, GameSession *session, char* filename, char* dirname) {
 
     char fullname[MAX_FILENAME];
     strcpy(fullname, dirname);
@@ -22,7 +22,6 @@ int read_level(board_t* board, char* filename, char* dirname) {
     char command[MAX_COMMAND_LENGTH];
 
     // Pacman is optional
-    board->pacman_file[0] = '\0';
     board->n_pacmans = 1;
 
     strcpy(board->level_name, filename);
@@ -43,6 +42,9 @@ int read_level(board_t* board, char* filename, char* dirname) {
             if (arg1 && arg2) {
                 board->width = atoi(arg1);
                 board->height = atoi(arg2);
+                session->width = board->width;
+                session->height = board->height;
+                session->grid = malloc(session->width * session->height);
                 debug("DIM = %d x %d\n", board->width, board->height);
             }
         }
@@ -51,15 +53,8 @@ int read_level(board_t* board, char* filename, char* dirname) {
             char *arg = strtok(NULL, " \t\n");
             if (arg) {
                 board->tempo = atoi(arg);
+                session->tempo = board->tempo;
                 debug("TEMPO = %d\n", board->tempo);
-            }
-        }
-
-        else if (strcmp(word, "PAC") == 0) {
-            char *arg = strtok(NULL, " \t\n");
-            if (arg) {
-                snprintf(board->pacman_file, sizeof(board->pacman_file), "%s/%s", dirname, arg);
-                debug("PAC = %s\n", board->pacman_file);
             }
         }
 
@@ -106,14 +101,17 @@ int read_level(board_t* board, char* filename, char* dirname) {
             switch (content) {
                 case 'X': // wall
                     board->board[idx].content = 'W';
+                    session->grid[idx] = 'X';
                     break;
                 case '@': // portal
                     board->board[idx].content = ' ';
                     board->board[idx].has_portal = 1;
+                    session->grid[idx] = '@';
                     break;
                 default:
                     board->board[idx].content = ' ';
                     board->board[idx].has_dot = 1;
+                    session->grid[idx] = '.';
                     break;
             }
         }
@@ -236,8 +234,7 @@ int read_pacman(board_t* board, int points) {
     return 0;
 }
 
-
-int read_ghosts(board_t* board) {
+int read_ghosts(board_t* board, GameSession *session) {
     for (int i = 0; i < board->n_ghosts; i++) {
         int fd = open(board->ghosts_files[i], O_RDONLY);
         ghost_t* ghost = &board->ghosts[i];
@@ -267,6 +264,7 @@ int read_ghosts(board_t* board) {
                     ghost->pos_y = atoi(arg2);
                     int idx = ghost->pos_y * board->width + ghost->pos_x;
                     board->board[idx].content = 'M';
+                    session->grid[idx] = 'M';
                     debug("Ghost Pos = %d x %d\n", ghost->pos_x, ghost->pos_y);
                 }
             }

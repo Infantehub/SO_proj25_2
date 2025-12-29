@@ -127,7 +127,7 @@ void* pacman_thread(void *arg) {
     return (void*) retval;
 }
 
-void* ghost_thread(void *arg) {
+/*void* ghost_thread(void *arg) {
     ghost_thread_arg_t *ghost_arg = (ghost_thread_arg_t*) arg;
     board_t *board = ghost_arg->board;
     int ghost_ind = ghost_arg->ghost_index;
@@ -150,7 +150,7 @@ void* ghost_thread(void *arg) {
     }
 }
 
-/*int main(int argc, char** argv) {
+int main(int argc, char** argv) {
     if (argc != 2) {
         printf("Usage: %s <level_directory>\n", argv[0]);
         return -1;
