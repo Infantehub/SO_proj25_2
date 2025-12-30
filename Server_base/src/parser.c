@@ -6,7 +6,7 @@
 #include "board.h"
 #include <fcntl.h>
 
-int read_level(board_t* board, GameSession *session, char* filename, char* dirname) {
+int read_level(board_t* board, GameSession* session, char* filename, char* dirname) {
 
     char fullname[MAX_FILENAME];
     strcpy(fullname, dirname);
@@ -44,7 +44,6 @@ int read_level(board_t* board, GameSession *session, char* filename, char* dirna
                 board->height = atoi(arg2);
                 session->width = board->width;
                 session->height = board->height;
-                session->grid = malloc(session->width * session->height);
                 debug("DIM = %d x %d\n", board->width, board->height);
             }
         }
@@ -83,6 +82,8 @@ int read_level(board_t* board, GameSession *session, char* filename, char* dirna
     
     // the end of the file contains the grid
     board->board = calloc(board->width * board->height, sizeof(board_pos_t));
+    session->grid = calloc(board->width * board->height, sizeof(char));
+
     board->pacmans = calloc(board->n_pacmans, sizeof(pacman_t));
     board->ghosts = calloc(board->n_ghosts, sizeof(ghost_t));
 
@@ -111,7 +112,7 @@ int read_level(board_t* board, GameSession *session, char* filename, char* dirna
                 default:
                     board->board[idx].content = ' ';
                     board->board[idx].has_dot = 1;
-                    session->grid[idx] = '.';
+                    session->grid[idx] = 'o';
                     break;
             }
         }
@@ -234,7 +235,7 @@ int read_pacman(board_t* board, int points) {
     return 0;
 }
 
-int read_ghosts(board_t* board, GameSession *session) {
+int read_ghosts(board_t* board) {
     for (int i = 0; i < board->n_ghosts; i++) {
         int fd = open(board->ghosts_files[i], O_RDONLY);
         ghost_t* ghost = &board->ghosts[i];
@@ -264,7 +265,7 @@ int read_ghosts(board_t* board, GameSession *session) {
                     ghost->pos_y = atoi(arg2);
                     int idx = ghost->pos_y * board->width + ghost->pos_x;
                     board->board[idx].content = 'M';
-                    session->grid[idx] = 'M';
+                    //Por ghosts na grid no translate board to session
                     debug("Ghost Pos = %d x %d\n", ghost->pos_x, ghost->pos_y);
                 }
             }
@@ -311,6 +312,7 @@ int read_ghosts(board_t* board, GameSession *session) {
         close(fd);
     }
 
+    debug("All ghosts loaded successfully\n");
     return 0;
 }
 

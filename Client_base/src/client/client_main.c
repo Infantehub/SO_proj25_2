@@ -19,11 +19,17 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static void *receiver_thread(void *arg) {
     (void)arg;
 
-    while (true) {
+    while (!stop_execution) {
         
         Board board = receive_board_update();
 
+        debug("Received board update: width=%d height=%d tempo=%d victory=%d game_over=%d accumulated_points=%d\n",
+              board.width, board.height, board.tempo, board.victory, board.game_over, board.accumulated_points);
+
         if (!board.data || board.game_over == 1){
+            if(board.data){
+                free(board.data);
+            }
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
@@ -36,10 +42,34 @@ static void *receiver_thread(void *arg) {
 
         draw_board_client(board);
         refresh_screen();
+
+        free(board.data);
+        board.data = NULL;
     }
 
     debug("Returning receiver thread...\n");
     return NULL;
+}
+
+void screen_refresh(board_t * game_board, int mode) {
+    debug("REFRESH\n");
+    draw_board(game_board, mode);
+    refresh_screen();     
+}
+
+void* ncurses_thread(void *arg) {
+    board_t *board = (board_t*) arg;
+    sleep_ms(board->tempo / 2);
+    while (true) {
+        sleep_ms(board->tempo);
+        pthread_rwlock_wrlock(&board->state_lock);
+        if (stop_execution) {
+            pthread_rwlock_unlock(&board->state_lock);
+            pthread_exit(NULL);
+        }
+        screen_refresh(board, DRAW_MENU);
+        pthread_rwlock_unlock(&board->state_lock);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -80,8 +110,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    pthread_t receiver_thread_id;
+    pthread_t receiver_thread_id, ncurses_thread_id;
+    pthread_create(&ncurses_thread_id, NULL, ncurses_thread, (void*)&board);
     pthread_create(&receiver_thread_id, NULL, receiver_thread, NULL);
+
+    if (receiver_thread_id == 0) {
+        debug("Failed to create receiver thread\n");
+        pacman_disconnect();
+        return 1;
+    }
 
     terminal_init();
     set_timeout(500);

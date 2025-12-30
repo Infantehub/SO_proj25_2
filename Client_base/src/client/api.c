@@ -21,7 +21,6 @@ struct Session {
 static struct Session session = {.op_code = -1};
 
 int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char const *server_pipe_path) {
-    open_debug_file("client-api-debug.log");
     debug("Connecting to server...\n");
 
     // 1. Criar os pipes do cliente
@@ -38,7 +37,7 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     debug("Client FIFOs created: %s, %s\n", req_pipe_path, notif_pipe_path);
 
     //2. Preparar estrutura de dados para pedido de conexão
-   strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
+    strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
     strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
 
     char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
@@ -56,7 +55,7 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     }
 
     // 4. Enviar pedido de conexão
-    if (write(fd_server, &connect_req_buffer, sizeof(connect_req_buffer)) == -1) {
+    if (write(fd_server, connect_req_buffer, sizeof(connect_req_buffer)) == -1) {
         debug("Failed to write connection request to server\n");
         return 1;
     }
@@ -90,7 +89,8 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
         debug("Failed to read connection response from server\n");
         return 1;
     }
-    debug("Connection response received from server:%s\n", connect_resp_buffer);
+    debug("Connection response: opcode=%d status=%d\n",
+      connect_resp_buffer[0], connect_resp_buffer[1]);
 
     if (connect_resp_buffer[0] == OP_CODE_CONNECT && connect_resp_buffer[1] == 0) {
         // 8. Sucesso! Agora abrimos o pipe de pedidos para enviar jogadas futuras
@@ -104,59 +104,67 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
 
 void pacman_play(char command) {
 
-  // 1. Preparar estrutura de dados para pedido de jogada
-  char play_req_buffer[2 * sizeof(char)];
-  memset(play_req_buffer, 0, sizeof(play_req_buffer));
+    // 1. Preparar estrutura de dados para pedido de jogada
+    char play_req_buffer[2 * sizeof(char)];
+    memset(play_req_buffer, 0, sizeof(play_req_buffer));
 
-  play_req_buffer[0] = OP_CODE_PLAY;
-  play_req_buffer[1] = command;
+    play_req_buffer[0] = OP_CODE_PLAY;
+    play_req_buffer[1] = command;
 
-  // 2. Enviar pedido de jogada ao servidor
-  if (write(session.fd_req_pipe, &play_req_buffer, sizeof(play_req_buffer)) == -1) {
-      debug("Failed to write play request to server\n");
-  }
+    // 2. Enviar pedido de jogada ao servidor
+    if (write(session.fd_req_pipe, &play_req_buffer, sizeof(play_req_buffer)) == -1) {
+        debug("Failed to write play request to server\n");
+    }
 }
 
 int pacman_disconnect() {
-  //1. Enviar pedido de desconexão ao servidor
-  char op_code = OP_CODE_DISCONNECT;
-  if (write(session.fd_req_pipe, &op_code, sizeof(op_code)) == -1) {
-      debug("Failed to write disconnect request to server\n");
-      return 1;
-  }
+    //1. Enviar pedido de desconexão ao servidor
+    char op_code = OP_CODE_DISCONNECT;
+    if (write(session.fd_req_pipe, &op_code, sizeof(op_code)) == -1) {
+         debug("Failed to write disconnect request to server\n");
+        return 1;
+    }
 
-  //2. Fechar os pipes do cliente
-  if (close(session.fd_req_pipe) == -1) {
-      debug("Failed to close request pipe\n");
-      return 1;
-  }
-  if (close(session.fd_notif_pipe) == -1) {
-      debug("Failed to close notification pipe\n");
-      return 1;
-  }
+    //2. Fechar os pipes do cliente
+    if (close(session.fd_req_pipe) == -1) {
+        debug("Failed to close request pipe\n");
+        return 1;
+    }
+    if (close(session.fd_notif_pipe) == -1) {
+        debug("Failed to close notification pipe\n");
+        return 1;
+    }
 
-  //3. Apagar os pipes do cliente
-  if (unlink(session.req_pipe_path) == -1) {
-      debug("Failed to unlink request pipe\n");
-  }
-  if (unlink(session.notif_pipe_path) == -1) {
-      debug("Failed to unlink notification pipe\n");
-  }
-  close_debug_file();
-  return 0;
+    //3. Apagar os pipes do cliente
+    if (unlink(session.req_pipe_path) == -1) {
+        debug("Failed to unlink request pipe\n");
+    }
+    if (unlink(session.notif_pipe_path) == -1) {
+        debug("Failed to unlink notification pipe\n");
+    }
+    close_debug_file();
+    return 0;
 }
 
-Board receive_board_update(void) {
+Board  receive_board_update(void) {
     Board board;
     char buffer1[sizeof(char) + 6*sizeof(int)];
 
-    // 1. Ler a atualização do tabuleiro do pipe de notificações
-    if (read(session.fd_notif_pipe, &buffer1, sizeof(buffer1)) == -1) {
-        debug("Failed to read board update from server\n");
-        return board;
-    }
+    memset(&board, 0, sizeof(Board));
 
-   // 2. Processar a atualização do tabuleiro
+    // 1. Ler a atualização do tabuleiro do pipe de notificações
+    long unsigned int total = 0;
+    while (total < sizeof(buffer1)) {
+        int n = read(session.fd_notif_pipe, buffer1 + total, sizeof(buffer1) - total);
+        if (n < 0) {
+            debug("Error reading tab\n");
+            return board;
+        }
+        total += n;
+    }
+    debug("Board update header received from server:%d\n", buffer1[0]);
+
+// 2. Processar a atualização do tabuleiro
     if (buffer1[0] != OP_CODE_BOARD) {
         debug("Invalid op_code in board update:%d\n", buffer1[0]);
         return board;
@@ -174,7 +182,7 @@ Board receive_board_update(void) {
         debug("Failed to allocate memory for board data\n");
         return board;
     }
-  
+
     // 4. Ler os dados do tabuleiro do pipe de notificações
     if (read(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
         debug("Failed to read board data from server\n");

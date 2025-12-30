@@ -447,14 +447,28 @@ void kill_pacman(board_t* board, int pacman_index) {
 
 // Static Loading
 int load_pacman(board_t* board, GameSession *session, int points) {
-    board->board[1 * board->width + 1].content = 'P'; // Pacman
-    board->pacmans[0].pos_x = 1;
-    board->pacmans[0].pos_y = 1;
+    int x = 0, y = 0;
+    for(y = 0; y < board->height; y++) {
+        for(x = 0; x < board->width; x++) {
+            int idx = y * board->width + x;
+            if (board->board[idx].content == 'W' || board->board[idx].content == 'M'|| board->board[idx].has_portal) {
+                continue;
+            }
+            else if (board->board[idx].has_dot) {
+                break;
+            }
+        }
+    }
+
+    board->board[y * board->width + x].content = 'P'; // Pacman
+    board->pacmans[0].pos_x = x;
+    board->pacmans[0].pos_y = y;
     board->pacmans[0].alive = 1;
     board->pacmans[0].points = points;
 
-    session->pacman_x = 1;
-    session->pacman_y = 1;
+    session->grid[y * board->width + x] = 'C';
+    session->pacman_x = x;
+    session->pacman_y = y;
     session->score = points;
     return 0;
 }
@@ -470,17 +484,18 @@ int load_ghost(board_t* board) {
     return 0;
 }
 
-int load_level(board_t *board, GameSession *session, char *filename, char* dirname, int acc_points) {
+int load_level(board_t *board, GameSession* session, char *filename, char* dirname, int acc_points) {
 
     if (read_level(board, session, filename, dirname) < 0) {
-        printf("Failed to load level\n");
+        debug("Failed to load level\n");
         return -1;
     }
     
     load_pacman(board, session, acc_points);
 
-    if (read_ghosts(board, session) < 0) {
-        printf("Failed to read ghosts\n");
+    if (read_ghosts(board) < 0) {
+        debug("Failed to read ghosts\n");
+        return -1;
     }
 
     pthread_rwlock_init(&board->state_lock, NULL);

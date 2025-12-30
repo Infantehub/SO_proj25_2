@@ -101,7 +101,7 @@ int load_ghost(board_t* board);
 /*
 Fils the board with the information coming from the file
 */
-int load_level(board_t* board, GameSession *session, char* filename, char* dirname, int accumulated_points);
+int load_level(board_t* board, GameSession* session, char* filename, char* dirname, int accumulated_points);
 // Unloads levels loaded by load_level
 void unload_level(board_t * board);
 
