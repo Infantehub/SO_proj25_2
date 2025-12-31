@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 
+#define BOARD_HEADER_SIZE (1 + 6 * sizeof(int))
 
 struct Session {
   char op_code;
@@ -19,6 +20,16 @@ struct Session {
 };
 
 static struct Session session = {.op_code = -1};
+
+static int read_all(int fd, void *buf, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = read(fd, (char *)buf + total, len - total);
+        if (n <= 0) return -1; 
+        total += n;
+    }
+    return 1;
+}
 
 int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char const *server_pipe_path) {
     debug("Connecting to server...\n");
@@ -40,12 +51,12 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     strncpy(session.req_pipe_path, req_pipe_path, MAX_PIPE_PATH_LENGTH);
     strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
 
-    char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
+    char connect_req_buffer[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
     memset(connect_req_buffer, 0, sizeof(connect_req_buffer));
 
     connect_req_buffer[0] = OP_CODE_CONNECT;
-    strncpy(&connect_req_buffer[1], req_pipe_path, MAX_PIPE_PATH_LENGTH);
-    strncpy(&connect_req_buffer[1 + MAX_PIPE_PATH_LENGTH], notif_pipe_path, MAX_PIPE_PATH_LENGTH);
+    strncpy(&connect_req_buffer[sizeof(char)], req_pipe_path, MAX_PIPE_PATH_LENGTH);
+    strncpy(&connect_req_buffer[sizeof(char) + MAX_PIPE_PATH_LENGTH * sizeof(char)], notif_pipe_path, MAX_PIPE_PATH_LENGTH);
 
     // 3. Abrir o FIFO para pedido de conexão ao servidor
     int fd_server = open(server_pipe_path, O_WRONLY);
@@ -83,16 +94,15 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
 
     // 7. Ler a resposta de conexão
     char connect_resp_buffer[2 * sizeof(char)];
-    memset(connect_resp_buffer, 0, sizeof(connect_resp_buffer));
 
-    if(read(session.fd_notif_pipe, &connect_resp_buffer, sizeof(connect_resp_buffer)) == -1) {
-        debug("Failed to read connection response from server\n");
+    if(read_all(session.fd_notif_pipe, connect_resp_buffer, sizeof(connect_resp_buffer)) == -1) {
         return 1;
     }
-    debug("Connection response: opcode=%d status=%d\n",
-      connect_resp_buffer[0], connect_resp_buffer[1]);
+    char op, result;
+    memcpy(&op, &connect_resp_buffer[0], sizeof(char));
+    memcpy(&result, &connect_resp_buffer[1], sizeof(char));
 
-    if (connect_resp_buffer[0] == OP_CODE_CONNECT && connect_resp_buffer[1] == 0) {
+    if (op == OP_CODE_CONNECT && result == 0) {
         // 8. Sucesso! Agora abrimos o pipe de pedidos para enviar jogadas futuras
         debug("Connected to server successfully\n");
         return 0;
@@ -146,35 +156,33 @@ int pacman_disconnect() {
     return 0;
 }
 
-Board  receive_board_update(void) {
+Board receive_board_update(void) {
     Board board;
-    char buffer1[sizeof(char) + 6*sizeof(int)];
+    char header[BOARD_HEADER_SIZE]; // Buffer para a string de texto
 
     memset(&board, 0, sizeof(Board));
 
     // 1. Ler a atualização do tabuleiro do pipe de notificações
-    long unsigned int total = 0;
-    while (total < sizeof(buffer1)) {
-        int n = read(session.fd_notif_pipe, buffer1 + total, sizeof(buffer1) - total);
-        if (n < 0) {
-            debug("Error reading tab\n");
-            return board;
-        }
-        total += n;
-    }
-    debug("Board update header received from server:%d\n", buffer1[0]);
-
-// 2. Processar a atualização do tabuleiro
-    if (buffer1[0] != OP_CODE_BOARD) {
-        debug("Invalid op_code in board update:%d\n", buffer1[0]);
+    if(read_all(session.fd_notif_pipe, header, sizeof(header)) == -1) {
         return board;
     }
-    memcpy(&board.width, &buffer1[1], sizeof(int));
-    memcpy(&board.height, &buffer1[1 + sizeof(int)], sizeof(int));
-    memcpy(&board.tempo, &buffer1[1 + 2*sizeof(int)], sizeof(int));
-    memcpy(&board.victory, &buffer1[1 + 3*sizeof(int)], sizeof(int));
-    memcpy(&board.game_over, &buffer1[1 + 4*sizeof(int)], sizeof(int));
-    memcpy(&board.accumulated_points, &buffer1[1 + 5*sizeof(int)], sizeof(int));
+    
+    // 2. Processar a atualização do tabuleiro
+    int off = 0;
+    char op = header[off++];
+    if (op != OP_CODE_BOARD) {
+        debug("Invalid OP code: %d\n", op);
+        return board;
+    }
+
+    memcpy(&board.width, header + off, sizeof(int)); off += sizeof(int);
+    memcpy(&board.height, header + off, sizeof(int)); off += sizeof(int);
+    memcpy(&board.tempo, header + off, sizeof(int)); off += sizeof(int);
+    memcpy(&board.victory, header + off, sizeof(int)); off += sizeof(int);
+    memcpy(&board.game_over, header + off, sizeof(int)); off += sizeof(int);
+    memcpy(&board.accumulated_points, header + off, sizeof(int));
+
+    
 
     // 3. Alocar memória para os dados do tabuleiro
     board.data = (char*)malloc(board.width * board.height * sizeof(char));
@@ -184,8 +192,9 @@ Board  receive_board_update(void) {
     }
 
     // 4. Ler os dados do tabuleiro do pipe de notificações
-    if (read(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
-        debug("Failed to read board data from server\n");
+    if (read_all(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
+        free(board.data);
+        board.data = NULL;
         return board;
     }
 

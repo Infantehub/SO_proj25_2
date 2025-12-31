@@ -1,9 +1,7 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include "protocol.h"
 #include "board.h"
-#include "debug.h"
 
 #define CONTINUE_PLAY 0
 #define NEXT_LEVEL 1

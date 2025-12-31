@@ -9,7 +9,9 @@
 #include <errno.h>
 #include <dirent.h>
 
-#include "../include/server.h"
+#include "protocol.h"
+#include "debug.h"
+#include "server.h"
 
 static inline int get_board_index(board_t* board, int x, int y) {
     return y * board->width + x;
@@ -53,14 +55,16 @@ void* input_handler_thread(void* arg){
     GameSession *session = pac_arg->game_session;
 
     free(pac_arg);
-    char buf[2];
+    
+    char buf[2 * sizeof(char)];
     int *retval = malloc(sizeof(int));
     *retval = 0; // Inicializar por segurança
 
     while(session->active) {
         // 1. Ler (bloqueante, sem lock, o que é bom)
-        ssize_t n = read(session->fd_req, &buf, sizeof(buf));
-        if (n < 0) {
+        int n = read(session->fd_req, &buf, sizeof(buf));
+        debug("Read %d bytes from client request pipe\n", n);
+        if (n <= 0) {
             // Cliente saiu ou erro
             debug("Error reading client request\n");
             pthread_mutex_lock(&session->lock);
@@ -145,8 +149,7 @@ void send_board_to_client(GameSession *session) {
 
     // 3. Enviar cabeçalho primeiro
     debug("Sending board update to client:\n");
-    ssize_t n = write(session->fd_notif, buffer, header_size);
-    if (n == -1 && errno == EPIPE) {
+    if (write(session->fd_notif, buffer, header_size) == -1 ) {
         session->active = 0;
         return;
     }
@@ -168,6 +171,11 @@ void send_board_to_client(GameSession *session) {
 }
 
 void translate_board_to_session(board_t *board, GameSession *session) {
+    debug("Translating board to session format\n");
+    // Assegurar que o grid da sessão está alocado
+    if (!session->grid) {
+        session->grid = malloc(board->width * board->height);
+    }
     for (int y = 0; y < board->height; y++) {
         for (int x = 0; x < board->width; x++) {
             int idx = get_board_index(board, x, y);
@@ -197,22 +205,26 @@ void translate_board_to_session(board_t *board, GameSession *session) {
         session->pacman_x = board->pacmans[0].pos_x;
         session->pacman_y = board->pacmans[0].pos_y;
     }
+    if(board->pacmans[0].alive == 0) {
+        session->game_over = 1;
+    }
+
 }
 
 void* ghost_thread(void *arg) {
     ghost_thread_arg_t *ghost_arg = (ghost_thread_arg_t*) arg;
+
     board_t *board = ghost_arg->board;
     GameSession *session = (GameSession*) ghost_arg->game_session;
     int ghost_ind = ghost_arg->ghost_index;
+    ghost_t* ghost = &board->ghosts[ghost_ind];
 
     free(ghost_arg);
-
-    ghost_t* ghost = &board->ghosts[ghost_ind];
 
     while (1) {
         sleep_ms(board->tempo * (1 + ghost->passo));
 
-        pthread_rwlock_rdlock(&board->state_lock);
+        pthread_rwlock_wrlock(&board->state_lock);
         if (!session->active) {
             pthread_rwlock_unlock(&board->state_lock);
             pthread_exit(NULL);
@@ -233,13 +245,13 @@ void* send_board_thread(void* arg){
     debug("Board sender thread starts now\n");
 
     while(session->active) {
-        debug("session active, preparing to send board\n");
         sleep_ms(100); // Dormir 100ms (10 FPS)
 
         pthread_mutex_lock(&session->lock);
         // 1. Prepara e envia o tabuleiro
         translate_board_to_session(board, session);
         send_board_to_client(session);
+        debug("Board sent to client\n");
 
         pthread_mutex_unlock(&session->lock);
     }
@@ -267,8 +279,8 @@ int main(int argc, char *argv[]) {
     }
     
     // 3. Espera por conexão de cliente
-    // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 83 bytes
-    char connectbuf[(1 + 2 * MAX_PIPE_PATH_LENGTH + 2) * sizeof(char)];
+    // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
+    char connectbuf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
     ssize_t n = read(fd, &connectbuf, sizeof(connectbuf));
 
     if (n <= 0) {
@@ -278,19 +290,19 @@ int main(int argc, char *argv[]) {
     }
 
     char opcode = connectbuf[0];
-    if (opcode == OP_CODE_CONNECT && n==83){
+    if (opcode == OP_CODE_CONNECT && n==(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)) {
         // 4. Inicializa sessão de jogo
         debug("Client connected\n");
         GameSession session;
         board_t game_board;
         memset(&session, 0, sizeof(session));
-        session.active = 0;
+        session.active = 1;
         pthread_mutex_init(&session.lock, NULL);
 
         // 5. Abrir pipes do cliente, por ordem que são abertos no api.c
         char req_path[MAX_PIPE_PATH_LENGTH], notif_path[MAX_PIPE_PATH_LENGTH];
-        memcpy(req_path, connectbuf + 1, MAX_PIPE_PATH_LENGTH);
-        memcpy(notif_path, connectbuf + 1 + MAX_PIPE_PATH_LENGTH, MAX_PIPE_PATH_LENGTH);
+        memcpy(req_path, connectbuf + sizeof(char), MAX_PIPE_PATH_LENGTH);
+        memcpy(notif_path, connectbuf + sizeof(char) + MAX_PIPE_PATH_LENGTH * sizeof(char), MAX_PIPE_PATH_LENGTH);
 
         session.fd_notif = open(notif_path, O_WRONLY);
         if (session.fd_notif == -1) {
@@ -310,9 +322,9 @@ int main(int argc, char *argv[]) {
 
 
         // 6. Enviar Ack de conexão
-        char ack[2] = {OP_CODE_CONNECT, 0}; // Result 0 = OK
+        char ack[2 * sizeof(char)] = {OP_CODE_CONNECT, 0}; // Result 0 = OK
 
-        if(write(session.fd_notif, ack, 2) == -1) {
+        if(write(session.fd_notif, ack, 2 * sizeof(char)) == -1) {
             debug("Failed to send connection ACK to client\n");
             close(session.fd_req);
             close(session.fd_notif);
@@ -361,6 +373,7 @@ int main(int argc, char *argv[]) {
                         ghost_thread_arg_t *arg = malloc(sizeof(ghost_thread_arg_t));
                         arg->board = &game_board;
                         arg->ghost_index = i;
+                        arg->game_session = &session;
                         pthread_create(&ghost_tids[i], NULL, ghost_thread, (void*) arg);
                     }
 

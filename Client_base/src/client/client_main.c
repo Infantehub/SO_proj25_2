@@ -20,55 +20,78 @@ static void *receiver_thread(void *arg) {
     (void)arg;
 
     while (!stop_execution) {
-        
-        Board board = receive_board_update();
-
-        debug("Received board update: width=%d height=%d tempo=%d victory=%d game_over=%d accumulated_points=%d\n",
-              board.width, board.height, board.tempo, board.victory, board.game_over, board.accumulated_points);
-
-        if (!board.data || board.game_over == 1){
-            if(board.data){
-                free(board.data);
-            }
+        // 1. Recebe FORA do lock (não bloqueia as outras threads)
+        Board new_data = receive_board_update();
+        if (new_data.data == NULL) {
+            // Erro a receber ou fim de jogo
+            pthread_mutex_lock(&mutex);
+            stop_execution = true;
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
+        if (new_data.game_over == 1) {
+            free(new_data.data);
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
             break;
         }
 
+        // 2. Verifica erro/fim de jogo
+        if (!new_data.data || new_data.game_over == 1) {
+            if (new_data.data) free(new_data.data);
+            pthread_mutex_lock(&mutex);
+            stop_execution = true;
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
+
+        // 3. Entra, troca os dados e sai rápido
         pthread_mutex_lock(&mutex);
+        
+        // LIBERTA a memória do frame anterior antes de guardar o novo
+        if (board.data != NULL) {
+            free(board.data);
+        }
+        
+        board = new_data; // Agora sim, a global tem os novos dados
         tempo = board.tempo;
+        
+        // Debug dentro do lock para garantir que os dados são consistentes
+        debug("Received update: %dx%d\n", board.width, board.height);
+        
         pthread_mutex_unlock(&mutex);
+    }
 
-        draw_board_client(board);
-        refresh_screen();
-
+    // Limpeza final ao sair
+    pthread_mutex_lock(&mutex);
+    if (board.data) {
         free(board.data);
         board.data = NULL;
     }
-
-    debug("Returning receiver thread...\n");
+    pthread_mutex_unlock(&mutex);
+    
     return NULL;
 }
 
-void screen_refresh(board_t * game_board, int mode) {
+void screen_refresh(Board game_board) {
     debug("REFRESH\n");
-    draw_board(game_board, mode);
+    draw_board_client(game_board);
     refresh_screen();     
 }
 
 void* ncurses_thread(void *arg) {
-    board_t *board = (board_t*) arg;
-    sleep_ms(board->tempo / 2);
+    (void)arg;
+    sleep_ms(tempo / 2);
     while (true) {
-        sleep_ms(board->tempo);
-        pthread_rwlock_wrlock(&board->state_lock);
+        sleep_ms(tempo);
+        pthread_mutex_lock(&mutex);
         if (stop_execution) {
-            pthread_rwlock_unlock(&board->state_lock);
+            pthread_mutex_unlock(&mutex);
             pthread_exit(NULL);
         }
-        screen_refresh(board, DRAW_MENU);
-        pthread_rwlock_unlock(&board->state_lock);
+        screen_refresh(board);
+        pthread_mutex_unlock(&mutex);
     }
 }
 
@@ -82,6 +105,7 @@ int main(int argc, char *argv[]) {
 
     const char *client_id = argv[1];
     char register_pipe[MAX_PIPE_PATH_LENGTH];
+    memset(register_pipe, 0, MAX_PIPE_PATH_LENGTH);
     strncpy(register_pipe, argv[2], MAX_PIPE_PATH_LENGTH);
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
@@ -96,6 +120,9 @@ int main(int argc, char *argv[]) {
 
     char req_pipe_path[MAX_PIPE_PATH_LENGTH];
     char notif_pipe_path[MAX_PIPE_PATH_LENGTH];
+
+    memset(req_pipe_path, 0, MAX_PIPE_PATH_LENGTH);
+    memset(notif_pipe_path, 0, MAX_PIPE_PATH_LENGTH);
 
     snprintf(req_pipe_path, MAX_PIPE_PATH_LENGTH,
              "/tmp/%s_request", client_id);
@@ -116,6 +143,11 @@ int main(int argc, char *argv[]) {
 
     if (receiver_thread_id == 0) {
         debug("Failed to create receiver thread\n");
+        pacman_disconnect();
+        return 1;
+    }
+    if (ncurses_thread_id == 0) {
+        debug("Failed to create ncurses thread\n");
         pacman_disconnect();
         return 1;
     }
@@ -184,6 +216,7 @@ int main(int argc, char *argv[]) {
     pacman_disconnect();
 
     pthread_join(receiver_thread_id, NULL);
+    pthread_join(ncurses_thread_id, NULL);
 
     if (cmd_fp)
         fclose(cmd_fp);

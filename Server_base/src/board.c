@@ -1,5 +1,3 @@
-#include "board.h"
-#include "parser.h"
 #include <stdlib.h>
 #include <stdio.h> //snprintf
 #include <fcntl.h>
@@ -8,7 +6,8 @@
 #include <stdarg.h>
 #include <pthread.h>
 
-FILE * debugfile;
+#include "parser.h"
+#include "debug.h"
 
 // Helper private function to find and kill pacman at specific position
 static int find_and_kill_pacman(board_t* board, int new_x, int new_y) {
@@ -31,13 +30,6 @@ static inline int get_board_index(board_t* board, int x, int y) {
 // Helper private function for checking valid position
 static inline int is_valid_position(board_t* board, int x, int y) {
     return (x >= 0 && x < board->width) && (y >= 0 && y < board->height); // Inside of the board boundaries
-}
-
-void sleep_ms(int milliseconds) {
-    struct timespec ts;
-    ts.tv_sec = milliseconds / 1000;
-    ts.tv_nsec = (milliseconds % 1000) * 1000000;
-    nanosleep(&ts, NULL);
 }
 
 int move_pacman(board_t* board, int pacman_index, command_t* command) {
@@ -448,28 +440,37 @@ void kill_pacman(board_t* board, int pacman_index) {
 // Static Loading
 int load_pacman(board_t* board, GameSession *session, int points) {
     int x = 0, y = 0;
+    int idx = 0;
+    int found = 0;
+
     for(y = 0; y < board->height; y++) {
         for(x = 0; x < board->width; x++) {
-            int idx = y * board->width + x;
-            if (board->board[idx].content == 'W' || board->board[idx].content == 'M'|| board->board[idx].has_portal) {
-                continue;
-            }
-            else if (board->board[idx].has_dot) {
+            idx = get_board_index(board, x, y);
+            if (session->grid[idx] == '.' ) {
+                found = 1;
                 break;
             }
         }
+        if (found) break;
     }
 
-    board->board[y * board->width + x].content = 'P'; // Pacman
+    if (!found) {
+        debug("Error: No valid position found for Pacman\n");
+        return -1;
+    }
+
+    board->board[idx].content = 'P'; // Pacman
     board->pacmans[0].pos_x = x;
     board->pacmans[0].pos_y = y;
     board->pacmans[0].alive = 1;
     board->pacmans[0].points = points;
 
-    session->grid[y * board->width + x] = 'C';
+    session->grid[idx] = 'C';
     session->pacman_x = x;
     session->pacman_y = y;
     session->score = points;
+
+    debug("Pacman loaded at (%d, %d) with %d points\n", x, y, points);
     return 0;
 }
 
@@ -484,7 +485,7 @@ int load_ghost(board_t* board) {
     return 0;
 }
 
-int load_level(board_t *board, GameSession* session, char *filename, char* dirname, int acc_points) {
+int load_level(board_t *board, GameSession *session, char *filename, char* dirname, int acc_points) {
 
     if (read_level(board, session, filename, dirname) < 0) {
         debug("Failed to load level\n");
@@ -517,22 +518,6 @@ void unload_level(board_t * board) {
     free(board->ghosts);
 }
 
-void open_debug_file(char *filename) {
-    debugfile = fopen(filename, "w");
-}
-
-void close_debug_file() {
-    fclose(debugfile);
-}
-
-void debug(const char * format, ...) {
-    va_list args;
-    va_start(args, format);
-    vfprintf(debugfile, format, args);
-    va_end(args);
-
-    fflush(debugfile);
-}
 
 void print_board(board_t *board) {
     if (!board || !board->board) {

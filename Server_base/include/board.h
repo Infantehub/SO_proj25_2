@@ -7,6 +7,7 @@
 #define MAX_GHOSTS 25
 
 #include <pthread.h>
+#include "game_session.h"
 
 typedef enum {
     REACHED_PORTAL = 1,
@@ -63,24 +64,6 @@ typedef struct {
     pthread_rwlock_t state_lock;
 } board_t;
 
-typedef struct {
-    int active;           // Flag para parar as threads
-    int fd_req;           // Ler do cliente
-    int fd_notif;         // Escrever para o cliente
-    
-    // Dados do Jogo
-    pthread_mutex_t lock; // Protege o acesso ao jogo
-    char *grid;           // O array do tabuleiro
-    int width;
-    int height;
-    int pacman_x;
-    int pacman_y;
-    int tempo;
-    int score;
-    int game_over;
-    int victory;
-} GameSession;
-
 /*Move pacman/monster in a certain direction on the board must check for boundaries, walls and other monsters
 Maybe do 1 function for pacman and 1 for monsters if required
 Maybe do 1 function for each direction
@@ -104,14 +87,6 @@ Fils the board with the information coming from the file
 int load_level(board_t* board, GameSession* session, char* filename, char* dirname, int accumulated_points);
 // Unloads levels loaded by load_level
 void unload_level(board_t * board);
-
-// DEBUG FILE
-
-void open_debug_file(char *filename);
-
-void close_debug_file();
-
-void debug(const char * format, ...);
 
 void print_board(board_t* board);
 

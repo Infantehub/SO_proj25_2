@@ -2,9 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "parser.h"
-#include "board.h"
 #include <fcntl.h>
+
+#include "parser.h"
+#include "debug.h"
+
 
 int read_level(board_t* board, GameSession* session, char* filename, char* dirname) {
 
@@ -102,7 +104,7 @@ int read_level(board_t* board, GameSession* session, char* filename, char* dirna
             switch (content) {
                 case 'X': // wall
                     board->board[idx].content = 'W';
-                    session->grid[idx] = 'X';
+                    session->grid[idx] = '#';
                     break;
                 case '@': // portal
                     board->board[idx].content = ' ';
@@ -112,7 +114,7 @@ int read_level(board_t* board, GameSession* session, char* filename, char* dirna
                 default:
                     board->board[idx].content = ' ';
                     board->board[idx].has_dot = 1;
-                    session->grid[idx] = 'o';
+                    session->grid[idx] = '.';
                     break;
             }
         }
