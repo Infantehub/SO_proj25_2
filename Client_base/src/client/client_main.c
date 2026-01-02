@@ -101,6 +101,7 @@ int main(int argc, char *argv[]) {
     strncpy(register_pipe, argv[2], MAX_PIPE_PATH_LENGTH);
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
+    //TODO: abrir ficheiro de comandos se for fornecido
     FILE *cmd_fp = NULL;
     if (commands_file) {
         cmd_fp = fopen(commands_file, "r");
@@ -194,7 +195,9 @@ int main(int argc, char *argv[]) {
 
         if (command == 'Q') {
             debug("Client pressed 'Q', quitting game\n");
+            pthread_mutex_lock(&mutex);
             stop_execution = true;
+            pthread_mutex_unlock(&mutex);
             break;
         }
 

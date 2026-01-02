@@ -92,7 +92,7 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     }
 
 
-    // 7. Ler a resposta de conexão
+    // 7. Ler a resposta de conexão (ack)
     char connect_resp_buffer[2 * sizeof(char)];
 
     if(read_all(session.fd_notif_pipe, connect_resp_buffer, sizeof(connect_resp_buffer)) == -1) {

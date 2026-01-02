@@ -64,6 +64,7 @@ void* input_handler_thread(void* arg){
     while(1) {
 
         // 2. Ler (bloqueante, sem lock, o que é bom)
+        memset(buf, 0, sizeof(buf));
         int n = read(session->fd_req, &buf, sizeof(buf));
         debug("Read %d bytes from client request pipe\n", n);
 
@@ -202,7 +203,7 @@ void translate_board_to_session(board_t *board, GameSession *session) {
                 session->grid[idx] = '@'; // Portal
             }
             else if(board->board[idx].has_dot) {
-                session->grid[idx] = 'o'; // Dot
+                session->grid[idx] = '.'; // Dot
             }
             else {
                 session->grid[idx] = ' '; // Empty
@@ -354,7 +355,7 @@ int main(int argc, char *argv[]) {
         }
         closedir(count_dir);
 
-        // 7. Carregar níveis da diretoria
+        // 7. Abre a diretoria
 
         DIR* level_dir = opendir(argv[1]);
         if (level_dir == NULL) {
@@ -373,6 +374,7 @@ int main(int argc, char *argv[]) {
             if (!dot) continue;
 
             if (strcmp(dot, ".lvl") == 0) {
+                // 8. Carregar nível
                 if (load_level(&game_board, &session, entry->d_name, argv[1], accumulated_points) == -1) {
                     debug("Failed to load level: %s\n", entry->d_name);
                     continue;
@@ -382,17 +384,17 @@ int main(int argc, char *argv[]) {
                 while(1){
                     session.active = 1;
 
-                    // 8. Criar threads para o jogo, cuidado com a ordem!
+                    // 9. Criar threads para o jogo, cuidado com a ordem!
                     pthread_t input_tid, board_tid;
                     pthread_t *ghost_tids = malloc(game_board.n_ghosts * sizeof(pthread_t));
 
-                    // 8.1 Criar thread de envio do tabuleiro
+                    // 9.1 Criar thread de envio do tabuleiro
                     pacman_thread_arg_t *board_arg = malloc(sizeof(pacman_thread_arg_t));
                     board_arg->board = &game_board;
                     board_arg->game_session = &session;
                     pthread_create(&board_tid, NULL, send_board_thread, board_arg);
 
-                    // 8.2 Criar threads dos fantasmas
+                    // 9.2 Criar threads dos fantasmas
                     for (int i = 0; i < game_board.n_ghosts; i++) {
                         ghost_thread_arg_t *arg = malloc(sizeof(ghost_thread_arg_t));
                         arg->board = &game_board;
@@ -401,17 +403,17 @@ int main(int argc, char *argv[]) {
                         pthread_create(&ghost_tids[i], NULL, ghost_thread, (void*) arg);
                     }
 
-                    // 8.3 Criar thread do input do pacman
+                    // 9.3 Criar thread do input do pacman
                     pacman_thread_arg_t *pac_arg = malloc(sizeof(pacman_thread_arg_t));
                     pac_arg->board = &game_board;
                     pac_arg->game_session = &session;
                     pthread_create(&input_tid, NULL, input_handler_thread, (void *) pac_arg);
 
-                    // 9. Esperar pela thread de input terminar
+                    // 10. Esperar pela thread de input terminar
                     int *retval;
                     pthread_join(input_tid, (void**)&retval);
 
-                    // 10. Parar o jogo
+                    // 11. Parar o jogo
                     pthread_mutex_lock(&session.lock);
                     session.active = 0;
                     pthread_mutex_unlock(&session.lock);
@@ -423,11 +425,20 @@ int main(int argc, char *argv[]) {
 
                     pthread_join(board_tid, NULL);
 
-                    // 11. Processar o resultado do jogo
+                    // 12. Processar o resultado do jogo
                     result = *retval;
                     free(retval);
                     if (result == NEXT_LEVEL) {
                         accumulated_points = game_board.pacmans[0].points;
+                        if (current_level_idx == total_levels) {
+                            // Último nível concluído
+                            pthread_mutex_lock(&session.lock);
+                            session.victory = 1;
+                            translate_board_to_session(&game_board, &session);
+                            send_board_to_client(&session);
+                            pthread_mutex_unlock(&session.lock);
+                            break; // Sair do loop de níveis
+                        }
                         break; // Carregar próximo nível
                     }
                     if (result == QUIT_GAME) {
@@ -442,25 +453,26 @@ int main(int argc, char *argv[]) {
                     free(session.grid);
                 }
             }
+            
+            if(session.game_over || session.victory) {
+                break;
+            }
         }
 
-        if (result == NEXT_LEVEL && current_level_idx == total_levels) {
-            // Enviar estado final ao cliente
-            pthread_mutex_lock(&session.lock);
-            session.victory = 1;
-            translate_board_to_session(&game_board, &session);
-            send_board_to_client(&session);
-            pthread_mutex_unlock(&session.lock);
-        }
+        char buf_quit[2 * sizeof(char)];
+        int p = read(session.fd_req, &buf_quit, sizeof(buf_quit));
+        debug("Read %d bytes from client request pipe before quitting\n", p);
 
-        // 12. Limpeza
-        unload_level(&game_board);
-        free(session.grid);
-        close(fd);
-        closedir(level_dir);
-        pthread_mutex_destroy(&session.lock);
-        unlink(server_fifo);   
-        close_debug_file(); 
+        if (p == 2){
+            // 13. Limpeza
+            unload_level(&game_board);
+            free(session.grid);
+            close(fd);
+            closedir(level_dir);
+            pthread_mutex_destroy(&session.lock);
+            unlink(server_fifo);   
+            close_debug_file(); 
+        }
     }
 
     return 0;

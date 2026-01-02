@@ -5,6 +5,7 @@
         E que tal se eu apenas traduzir para GameSession, antes da grid ser enviada? parecce-me bem... Assim, faço a lógica toda apenas mexendo no board e quando for enviar, mando a grid da game_session. -->resolvido assim
     
     -devo dar load ao jogo antes ou depois dos clientes se conectarem ao server?
+    -qual faz mais sentido começar primeir, a receiver thread ou a do ncurses?
 
 *A resolver:*
     -por o cliente a ler os ficheiros .p (reutilizar a função read_pacman definida no Server_base)
