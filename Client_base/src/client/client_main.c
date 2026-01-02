@@ -22,23 +22,7 @@ static void *receiver_thread(void *arg) {
     while (!stop_execution) {
         // 1. Recebe FORA do lock (não bloqueia as outras threads)
         Board new_data = receive_board_update();
-        if (new_data.data == NULL) {
-            // Erro a receber ou fim de jogo
-            pthread_mutex_lock(&mutex);
-            stop_execution = true;
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
-        if (new_data.game_over == 1) {
-            free(new_data.data);
-            pthread_mutex_lock(&mutex);
-            stop_execution = true;
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
-
-        // 2. Verifica erro/fim de jogo
-        if (!new_data.data || new_data.game_over == 1) {
+        if (!new_data.data) {
             if (new_data.data) free(new_data.data);
             pthread_mutex_lock(&mutex);
             stop_execution = true;
@@ -46,36 +30,34 @@ static void *receiver_thread(void *arg) {
             break;
         }
 
-        // 3. Entra, troca os dados e sai rápido
+        // 2. Entra, troca os dados e sai do lock
         pthread_mutex_lock(&mutex);
         
-        // LIBERTA a memória do frame anterior antes de guardar o novo
+        // 3. Liberta a memória do frame anterior antes de guardar o novo
         if (board.data != NULL) {
             free(board.data);
         }
         
-        board = new_data; // Agora sim, a global tem os novos dados
+        // 4. Atualiza o board global
+        board = new_data; 
         tempo = board.tempo;
-        
-        // Debug dentro do lock para garantir que os dados são consistentes
-        debug("Received update: %dx%d\n", board.width, board.height);
+
+        // 5. Verifica condições de paragem
+        if (board.game_over == 1 || board.victory == 1) {
+            stop_execution = true;
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
         
         pthread_mutex_unlock(&mutex);
     }
 
-    // Limpeza final ao sair
-    pthread_mutex_lock(&mutex);
-    if (board.data) {
-        free(board.data);
-        board.data = NULL;
-    }
-    pthread_mutex_unlock(&mutex);
+    // 6. Limpeza final ao sair pertence à ultima thread a acabar aka ncurses_thread
     
     return NULL;
 }
 
 void screen_refresh(Board game_board) {
-    debug("REFRESH\n");
     draw_board_client(game_board);
     refresh_screen();     
 }
@@ -86,13 +68,23 @@ void* ncurses_thread(void *arg) {
     while (true) {
         sleep_ms(tempo);
         pthread_mutex_lock(&mutex);
-        if (stop_execution) {
+        if(stop_execution) {
+            screen_refresh(board);
             pthread_mutex_unlock(&mutex);
-            pthread_exit(NULL);
+            break;
         }
         screen_refresh(board);
         pthread_mutex_unlock(&mutex);
     }
+
+    pthread_mutex_lock(&mutex);
+    if (board.data) {
+        free(board.data);
+        board.data = NULL;
+    }
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -154,8 +146,6 @@ int main(int argc, char *argv[]) {
 
     terminal_init();
     set_timeout(500);
-    draw_board_client(board);
-    refresh_screen();
 
     char command;
     int ch;
@@ -204,6 +194,7 @@ int main(int argc, char *argv[]) {
 
         if (command == 'Q') {
             debug("Client pressed 'Q', quitting game\n");
+            stop_execution = true;
             break;
         }
 
@@ -213,10 +204,14 @@ int main(int argc, char *argv[]) {
 
     }
 
-    pacman_disconnect();
-
     pthread_join(receiver_thread_id, NULL);
     pthread_join(ncurses_thread_id, NULL);
+
+    debug("Client exiting...\n");
+    if (pacman_disconnect() != 0) {
+        debug("Failed to disconnect from server\n");
+    }
+    debug("Client disconnected from server\n");
 
     if (cmd_fp)
         fclose(cmd_fp);

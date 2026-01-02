@@ -60,12 +60,14 @@ void* input_handler_thread(void* arg){
     int *retval = malloc(sizeof(int));
     *retval = 0; // Inicializar por segurança
 
-    while(session->active) {
-        // 1. Ler (bloqueante, sem lock, o que é bom)
+    //Loop principal da thread de input
+    while(1) {
+
+        // 2. Ler (bloqueante, sem lock, o que é bom)
         int n = read(session->fd_req, &buf, sizeof(buf));
         debug("Read %d bytes from client request pipe\n", n);
-        if (n <= 0) {
-            // Cliente saiu ou erro
+
+        if (n <= 0) { //Erro
             debug("Error reading client request\n");
             pthread_mutex_lock(&session->lock);
             session->active = 0;
@@ -73,17 +75,24 @@ void* input_handler_thread(void* arg){
             break;
         }
 
-        // 2. Trancar Sessão para processar
+        // 3. Trancar Sessão para processar
         pthread_mutex_lock(&session->lock);
         
         char opcode = buf[0];
 
+        // 4. Processar comando
+
+        // 4.1 Se o cliente pediu para disconectar (sempre para sair)
         if (opcode == OP_CODE_DISCONNECT) {
             session->active = 0;
+            close(session->fd_req);
+            close(session->fd_notif);
             pthread_mutex_unlock(&session->lock); // Destrancar antes de sair
-            break;
+            *retval = QUIT_GAME;
+            return (void*) retval;
         }
         
+        // 4.2 Se o cliente enviou um comando de jogo
         if (opcode == OP_CODE_PLAY) {
             char command = buf[1];
             
@@ -91,20 +100,21 @@ void* input_handler_thread(void* arg){
             if (command == 'Q') {
                 *retval = QUIT_GAME;
                 session->active = 0;
-                pthread_mutex_unlock(&session->lock); // IMPORTANTE: Destrancar antes de return
+                close(session->fd_req);
+                close(session->fd_notif);
+                pthread_mutex_unlock(&session->lock); // Destrancar antes de sair
                 return (void*) retval;
             }
 
-            // Mover Pacman - Requer Write Lock no tabuleiro!
-            pthread_rwlock_wrlock(&board->state_lock);
+            // 5. Mover Pacman
+            pthread_rwlock_wrlock(&board->state_lock); // Trancar o tabuleiro para mexer
             
             command_t play = { .command = command, .turns = 1 };
             debug("KEY %c\n", play.command);
 
             int result = move_pacman(board, 0, &play);
             
-            // Já acabámos de mexer no tabuleiro, podemos destrancar
-            pthread_rwlock_unlock(&board->state_lock);
+            pthread_rwlock_unlock(&board->state_lock); // Já acabámos de mexer no tabuleiro, podemos destrancar
 
             if (result == REACHED_PORTAL) {
                 *retval = NEXT_LEVEL;
@@ -120,7 +130,7 @@ void* input_handler_thread(void* arg){
             }
         }
 
-        // Fim da iteração: destranca a sessão para a próxima volta
+        // 6. Fim da iteração: destranca a sessão para a próxima volta
         pthread_mutex_unlock(&session->lock);
     }
     
@@ -259,7 +269,6 @@ void* send_board_thread(void* arg){
 }
 
 int main(int argc, char *argv[]) {
-    signal(SIGPIPE, SIG_IGN); //FIXME: Ver necessidade
     open_debug_file("server_debug.log");
     if(argc != 4) {
         debug("Usage: %s <levels_dir(str)> <max_sessions(int)> <nome_FIFO_de_registo(str)>\n", argv[0]);
@@ -333,6 +342,18 @@ int main(int argc, char *argv[]) {
         }
         debug("Connection ACK sent to client\n");
 
+        int total_levels = 0;
+        DIR* count_dir = opendir(argv[1]);
+        struct dirent* count_entry;
+        while ((count_entry = readdir(count_dir)) != NULL) {
+            char *dot = strrchr(count_entry->d_name, '.');
+            if (!dot) continue;
+            if (strcmp(dot, ".lvl") == 0) {
+                total_levels++;
+            }
+        }
+        closedir(count_dir);
+
         // 7. Carregar níveis da diretoria
 
         DIR* level_dir = opendir(argv[1]);
@@ -343,6 +364,8 @@ int main(int argc, char *argv[]) {
 
         struct dirent* entry;
         int accumulated_points = 0;
+        int current_level_idx = 0;
+        int result;
         while ((entry = readdir(level_dir)) != NULL && !session.game_over){
             if (entry->d_name[0] == '.') continue;
 
@@ -354,6 +377,7 @@ int main(int argc, char *argv[]) {
                     debug("Failed to load level: %s\n", entry->d_name);
                     continue;
                 }
+                current_level_idx++;
 
                 while(1){
                     session.active = 1;
@@ -400,29 +424,43 @@ int main(int argc, char *argv[]) {
                     pthread_join(board_tid, NULL);
 
                     // 11. Processar o resultado do jogo
-                    int result = *retval;
+                    result = *retval;
                     free(retval);
-                    if(result == NEXT_LEVEL) {
+                    if (result == NEXT_LEVEL) {
                         accumulated_points = game_board.pacmans[0].points;
                         break; // Carregar próximo nível
                     }
-                    if(result == QUIT_GAME) {
+                    if (result == QUIT_GAME) {
+                        pthread_mutex_lock(&session.lock);
                         session.game_over = 1;
+                        pthread_mutex_unlock(&session.lock);
                         break; // Sair do loop de níveis
                     }
                 }
-                unload_level(&game_board);
-                free(session.grid);
+                if (current_level_idx != total_levels) {
+                    unload_level(&game_board);
+                    free(session.grid);
+                }
             }
         }
 
-    // 12. Limpeza
-    close(session.fd_notif);
-    close(session.fd_req);
-    closedir(level_dir);
-    pthread_mutex_destroy(&session.lock);
-    unlink(server_fifo);   
-    close_debug_file(); 
+        if (result == NEXT_LEVEL && current_level_idx == total_levels) {
+            // Enviar estado final ao cliente
+            pthread_mutex_lock(&session.lock);
+            session.victory = 1;
+            translate_board_to_session(&game_board, &session);
+            send_board_to_client(&session);
+            pthread_mutex_unlock(&session.lock);
+        }
+
+        // 12. Limpeza
+        unload_level(&game_board);
+        free(session.grid);
+        close(fd);
+        closedir(level_dir);
+        pthread_mutex_destroy(&session.lock);
+        unlink(server_fifo);   
+        close_debug_file(); 
     }
 
     return 0;

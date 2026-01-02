@@ -128,12 +128,18 @@ void pacman_play(char command) {
 }
 
 int pacman_disconnect() {
-    //1. Enviar pedido de desconexão ao servidor
-    char op_code = OP_CODE_DISCONNECT;
-    if (write(session.fd_req_pipe, &op_code, sizeof(op_code)) == -1) {
-         debug("Failed to write disconnect request to server\n");
+    //1. Enviar aviso de desconexão ao servidor
+
+    char exit_buf[2 * sizeof(char)];
+    exit_buf[0] = OP_CODE_DISCONNECT;
+    exit_buf[1] = 0; //Just padding
+
+    debug("Disconnecting from server...\n");
+    if (write(session.fd_req_pipe, &exit_buf, sizeof(exit_buf)) == -1) {
+        debug("Failed to write disconnect request to server\n");
         return 1;
     }
+    debug("Disconnect request sent to server\n");
 
     //2. Fechar os pipes do cliente
     if (close(session.fd_req_pipe) == -1) {
@@ -144,6 +150,7 @@ int pacman_disconnect() {
         debug("Failed to close notification pipe\n");
         return 1;
     }
+    debug("Client pipes closed\n");
 
     //3. Apagar os pipes do cliente
     if (unlink(session.req_pipe_path) == -1) {
@@ -152,6 +159,7 @@ int pacman_disconnect() {
     if (unlink(session.notif_pipe_path) == -1) {
         debug("Failed to unlink notification pipe\n");
     }
+    debug("Client pipes unlinked\n");
     close_debug_file();
     return 0;
 }
