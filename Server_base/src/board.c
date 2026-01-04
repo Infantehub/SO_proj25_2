@@ -474,17 +474,6 @@ int load_pacman(board_t* board, GameSession *session, int points) {
     return 0;
 }
 
-// Static Loading
-int load_ghost(board_t* board) {
-    board->board[4 * board->width + 8].content = 'M'; // Monster
-    board->ghosts[0].pos_x = 8;
-    board->ghosts[0].pos_y = 4;
-    board->board[0 * board->width + 5].content = 'M'; // Monster
-    board->ghosts[1].pos_x = 5;
-    board->ghosts[1].pos_y = 0;
-    return 0;
-}
-
 int load_level(board_t *board, GameSession *session, char *filename, char* dirname, int acc_points) {
 
     if (read_level(board, session, filename, dirname) < 0) {
@@ -516,51 +505,4 @@ void unload_level(board_t * board) {
     free(board->board);
     free(board->pacmans);
     free(board->ghosts);
-}
-
-
-void print_board(board_t *board) {
-    if (!board || !board->board) {
-        debug("[%d] Board is empty or not initialized.\n", getpid());
-        return;
-    }
-
-    // Large buffer to accumulate the whole output
-    char buffer[8192];
-    size_t offset = 0;
-
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset,
-                       "=== [%d] LEVEL INFO ===\n"
-                       "Dimensions: %d x %d\n"
-                       "Tempo: %d\n"
-                       "Pacman file: %s\n",
-                       getpid(), board->height, board->width, board->tempo, board->pacman_file);
-
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset,
-                       "Monster files (%d):\n", board->n_ghosts);
-
-    for (int i = 0; i < board->n_ghosts; i++) {
-        offset += snprintf(buffer + offset, sizeof(buffer) - offset,
-                           "  - %s\n", board->ghosts_files[i]);
-    }
-
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "\n=== BOARD ===\n");
-
-    for (int y = 0; y < board->height; y++) {
-        for (int x = 0; x < board->width; x++) {
-            int idx = y * board->width + x;
-            if (offset < sizeof(buffer) - 2) {
-                buffer[offset++] = board->board[idx].content;
-            }
-        }
-        if (offset < sizeof(buffer) - 2) {
-            buffer[offset++] = '\n';
-        }
-    }
-
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "==================\n");
-
-    buffer[offset] = '\0';
-
-    debug("%s", buffer);
 }

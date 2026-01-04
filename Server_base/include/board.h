@@ -88,8 +88,6 @@ int load_level(board_t* board, GameSession* session, char* filename, char* dirna
 // Unloads levels loaded by load_level
 void unload_level(board_t * board);
 
-void print_board(board_t* board);
-
 void sleep_ms(int milliseconds);
 
 #endif
