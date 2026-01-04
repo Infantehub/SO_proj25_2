@@ -143,7 +143,7 @@ void* input_handler_thread(void* arg){
         pthread_mutex_unlock(&session->lock);
     }
 
-    sleep_ms(100);
+    sleep_ms(100); // Pequena espera para garantir que o cliente recebe o estado final
     
     return (void*) retval;
 }

@@ -14,7 +14,7 @@
 
 Board board;
 bool stop_execution = false;
-int tempo;
+int tempo = -1;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*Função simplificada para atualizar a tela*/
@@ -47,7 +47,7 @@ static void *receiver_thread(void *arg) {
             free(board.data);
         }
         
-        // 4. Atualiza o board global
+        // 4. Atualiza o board global e o tempo
         board = new_data; 
         tempo = board.tempo;
 
@@ -67,15 +67,20 @@ static void *receiver_thread(void *arg) {
 void* ncurses_thread(void *arg) {
     (void)arg;
 
-    // 1. Esperar que chegue o primeiro board
-    sleep_ms(tempo / 2);
-
     // 2. Loop de refresh
     while (true) {
-        // 3. Esperar o tempo definido
-        sleep_ms(tempo);
-
         pthread_mutex_lock(&mutex);
+        if (tempo < 0){
+            pthread_mutex_unlock(&mutex);
+            sleep_ms(100);
+            continue;
+        }
+
+        // 3. Esperar pelo tempo definido
+        int local_tempo = board.tempo;
+        pthread_mutex_unlock(&mutex);
+
+        sleep_ms(local_tempo);
 
         // 4. Verificar se deve parar
         if(stop_execution) {
@@ -199,7 +204,7 @@ int main(int argc, char *argv[]) {
             
             // Wait for tempo, to not overflow pipe with requests
             pthread_mutex_lock(&mutex);
-            int wait_for = tempo;
+            int wait_for = (tempo > 0) ? tempo * 10 : 200;
             pthread_mutex_unlock(&mutex);
 
             sleep_ms(wait_for);

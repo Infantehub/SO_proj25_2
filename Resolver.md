@@ -8,8 +8,6 @@
     -qual faz mais sentido começar primeir, a receiver thread ou a do ncurses?
 
 *A resolver:*
-    -por o cliente a ler os ficheiros .p (reutilizar a função read_pacman definida no Server_base)
-    -verificar lógica de passagem de nível
     -verificar tamanho dos paths dos pipes com e sem /0
 
 *Estética e sentido:*
