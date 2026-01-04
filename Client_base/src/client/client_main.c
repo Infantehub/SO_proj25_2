@@ -10,20 +10,29 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 
 Board board;
 bool stop_execution = false;
 int tempo;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/*Função simplificada para atualizar a tela*/
+void screen_refresh(Board game_board) {
+    draw_board_client(game_board);
+    refresh_screen();     
+}
+
 static void *receiver_thread(void *arg) {
     (void)arg;
 
     while (!stop_execution) {
-        // 1. Recebe FORA do lock (não bloqueia as outras threads)
+
+        // 1. Recebe novo tabuleiro 
+        // FORA do lock para não bloquear as outras threads
         Board new_data = receive_board_update();
-        if (!new_data.data) {
-            if (new_data.data) free(new_data.data);
+
+        if (new_data.data == NULL) {
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
@@ -45,8 +54,6 @@ static void *receiver_thread(void *arg) {
         // 5. Verifica condições de paragem
         if (board.game_over == 1 || board.victory == 1) {
             stop_execution = true;
-            pthread_mutex_unlock(&mutex);
-            break;
         }
         
         pthread_mutex_unlock(&mutex);
@@ -57,37 +64,42 @@ static void *receiver_thread(void *arg) {
     return NULL;
 }
 
-void screen_refresh(Board game_board) {
-    draw_board_client(game_board);
-    refresh_screen();     
-}
-
 void* ncurses_thread(void *arg) {
     (void)arg;
+
+    // 1. Esperar que chegue o primeiro board
     sleep_ms(tempo / 2);
+
+    // 2. Loop de refresh
     while (true) {
+        // 3. Esperar o tempo definido
         sleep_ms(tempo);
+
         pthread_mutex_lock(&mutex);
+
+        // 4. Verificar se deve parar
         if(stop_execution) {
-            screen_refresh(board);
+            // 4.1 Último refresh antes de sair
+            if (board.data != NULL) {
+                screen_refresh(board);
+            }
             pthread_mutex_unlock(&mutex);
             break;
         }
-        screen_refresh(board);
+
+        // 5. Fazer refresh do ecrã (normal)
+        if (board.data){
+            screen_refresh(board);
+        }
         pthread_mutex_unlock(&mutex);
     }
-
-    pthread_mutex_lock(&mutex);
-    if (board.data) {
-        free(board.data);
-        board.data = NULL;
-    }
-    pthread_mutex_unlock(&mutex);
 
     return NULL;
 }
 
 int main(int argc, char *argv[]) {
+    signal(SIGPIPE, SIG_IGN);
+
     if (argc != 3 && argc != 4) {
         fprintf(stderr,
             "Usage: %s <client_id> <register_pipe> [commands_file]\n",
@@ -95,13 +107,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // 1. Processar os argumentos
     const char *client_id = argv[1];
     char register_pipe[MAX_PIPE_PATH_LENGTH];
     memset(register_pipe, 0, MAX_PIPE_PATH_LENGTH);
     strncpy(register_pipe, argv[2], MAX_PIPE_PATH_LENGTH);
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
-    //TODO: abrir ficheiro de comandos se for fornecido
+    //TODO: 2. Abrir ficheiro de comandos se for fornecido
     FILE *cmd_fp = NULL;
     if (commands_file) {
         cmd_fp = fopen(commands_file, "r");
@@ -111,6 +124,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 3. Preparar os pipes do cliente
     char req_pipe_path[MAX_PIPE_PATH_LENGTH];
     char notif_pipe_path[MAX_PIPE_PATH_LENGTH];
 
@@ -125,11 +139,17 @@ int main(int argc, char *argv[]) {
 
     open_debug_file("client-debug.log");
 
+    // 4. Conectar ao servidor
     if (pacman_connect(req_pipe_path, notif_pipe_path, register_pipe) != 0) {
         perror("Failed to connect to server");
         return 1;
     }
 
+    // 5. Inicializar display
+    terminal_init();
+    set_timeout(500);
+
+    // 6. Criar threads de receção e ncurses
     pthread_t receiver_thread_id, ncurses_thread_id;
     pthread_create(&ncurses_thread_id, NULL, ncurses_thread, (void*)&board);
     pthread_create(&receiver_thread_id, NULL, receiver_thread, NULL);
@@ -145,21 +165,21 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    terminal_init();
-    set_timeout(500);
-
     char command;
     int ch;
 
+    // 7. Loop principal de input
     while (1) {
 
         pthread_mutex_lock(&mutex);
+        // 8. Verificar se deve parar
         if (stop_execution){
             pthread_mutex_unlock(&mutex);
             break;
         }
         pthread_mutex_unlock(&mutex);
 
+        // 9. Obter comando do ficheiro
         if (cmd_fp) {
             // Input from file
             ch = fgetc(cmd_fp);
@@ -184,8 +204,9 @@ int main(int argc, char *argv[]) {
 
             sleep_ms(wait_for);
             
-        } else {
-            // Interactive input
+        } 
+        else {
+            // 10. input interativo
             command = get_input();
             command = toupper(command);
         }
@@ -198,7 +219,6 @@ int main(int argc, char *argv[]) {
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
-            break;
         }
 
         debug("Command: %c\n", command);
@@ -207,14 +227,22 @@ int main(int argc, char *argv[]) {
 
     }
 
-    pthread_join(receiver_thread_id, NULL);
-    pthread_join(ncurses_thread_id, NULL);
-
     debug("Client exiting...\n");
     if (pacman_disconnect() != 0) {
         debug("Failed to disconnect from server\n");
     }
     debug("Client disconnected from server\n");
+
+    pthread_join(receiver_thread_id, NULL);
+    pthread_join(ncurses_thread_id, NULL);
+
+    // 6. Limpeza da memória do board --> ativado por stop_execution = true
+    pthread_mutex_lock(&mutex);
+    if (board.data != NULL) {
+        free(board.data);
+        board.data = NULL;
+    }
+    pthread_mutex_unlock(&mutex);
 
     if (cmd_fp)
         fclose(cmd_fp);
@@ -223,5 +251,6 @@ int main(int argc, char *argv[]) {
 
     terminal_cleanup();
 
+    close_debug_file();
     return 0;
 }

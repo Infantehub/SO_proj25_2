@@ -63,16 +63,34 @@ void* input_handler_thread(void* arg){
     //Loop principal da thread de input
     while(1) {
 
+        // 1. Verificar se o jogo acabou
+        if (board->pacmans[0].alive == 0) {
+            pthread_mutex_lock(&session->lock);
+            session->active = 0;
+            pthread_mutex_unlock(&session->lock);
+            *retval = QUIT_GAME;
+            break;
+        }
+
         // 2. Ler (bloqueante, sem lock, o que é bom)
         memset(buf, 0, sizeof(buf));
         int n = read(session->fd_req, &buf, sizeof(buf));
         debug("Read %d bytes from client request pipe\n", n);
 
-        if (n <= 0) { //Erro
+        if (n < 0) { //Erro
             debug("Error reading client request\n");
             pthread_mutex_lock(&session->lock);
             session->active = 0;
             pthread_mutex_unlock(&session->lock);
+            break;
+        }
+        if (n == 0) { //Pipe fechado -> monstro matou pacman entre passos 1 e 2
+            debug("Client request pipe closed\n");
+            pthread_mutex_lock(&session->lock);
+            session->active = 0;
+            session->game_over = 1;
+            pthread_mutex_unlock(&session->lock);
+            *retval = QUIT_GAME;
             break;
         }
 
@@ -83,29 +101,18 @@ void* input_handler_thread(void* arg){
 
         // 4. Processar comando
 
-        // 4.1 Se o cliente pediu para disconectar (sempre para sair)
+        // 4.1 Se o cliente pediu para disconectar
         if (opcode == OP_CODE_DISCONNECT) {
-            session->active = 0;
-            close(session->fd_req);
-            close(session->fd_notif);
+            session->active = 0; // Parar as outras threads
             pthread_mutex_unlock(&session->lock); // Destrancar antes de sair
             *retval = QUIT_GAME;
+            debug("Client requested disconnection\n");
             return (void*) retval;
         }
         
         // 4.2 Se o cliente enviou um comando de jogo
         if (opcode == OP_CODE_PLAY) {
             char command = buf[1];
-            
-            // QUIT
-            if (command == 'Q') {
-                *retval = QUIT_GAME;
-                session->active = 0;
-                close(session->fd_req);
-                close(session->fd_notif);
-                pthread_mutex_unlock(&session->lock); // Destrancar antes de sair
-                return (void*) retval;
-            }
 
             // 5. Mover Pacman
             pthread_rwlock_wrlock(&board->state_lock); // Trancar o tabuleiro para mexer
@@ -125,26 +132,30 @@ void* input_handler_thread(void* arg){
 
             if (result == DEAD_PACMAN) {
                 *retval = QUIT_GAME;
-                session->active = 0;
+                session->game_over = 1;
+                //session->active = 0;
                 pthread_mutex_unlock(&session->lock); // Destranca sessão
-                break; // Sai do loop
+                break;
             }
         }
 
         // 6. Fim da iteração: destranca a sessão para a próxima volta
         pthread_mutex_unlock(&session->lock);
     }
+
+    sleep_ms(100);
     
     return (void*) retval;
 }
 
-void send_board_to_client(GameSession *session) {
+int send_board_to_client(GameSession *session) {
+
     int header_size = 1*sizeof(char) + 6 * sizeof(int); // OP + 6 inteiros
     int board_size = session->width * session->height;
 
     debug("Preparing to send board update to client\n");
     char *buffer = malloc(header_size);
-    if (!buffer) return;
+    if (!buffer) return 1;
 
     int p = 0;
     // 1. OP CODE
@@ -160,25 +171,32 @@ void send_board_to_client(GameSession *session) {
 
     // 3. Enviar cabeçalho primeiro
     debug("Sending board update to client:\n");
-    if (write(session->fd_notif, buffer, header_size) == -1 ) {
+    int n = write(session->fd_notif, buffer, header_size);
+    if (n <= 0) {
         session->active = 0;
-        return;
+        return 1;
     }
     
     // 4. Preparar e enviar o tabuleiro
     char *board_buffer = malloc(board_size);
     if (!board_buffer) {
         free(buffer);
-        return;
+        return 1;
     }
     memcpy(board_buffer, session->grid, board_size);
 
     debug("Sending board grid to client:\n");
-    write(session->fd_notif, board_buffer, board_size);
+    int k = write(session->fd_notif, board_buffer, board_size);
+
+    if (k <= 0) {
+        session->active = 0;
+        return 1;
+    }
 
     // 5. Limpar
     free(buffer);
     free(board_buffer);
+    return 0;
 }
 
 void translate_board_to_session(board_t *board, GameSession *session) {
@@ -238,12 +256,13 @@ void* ghost_thread(void *arg) {
         pthread_rwlock_wrlock(&board->state_lock);
         if (!session->active) {
             pthread_rwlock_unlock(&board->state_lock);
-            pthread_exit(NULL);
+            break;
         }
         
         move_ghost(board, ghost_ind, &ghost->moves[ghost->current_move%ghost->n_moves]);
         pthread_rwlock_unlock(&board->state_lock);
     }
+    return NULL;
 }
 
 void* send_board_thread(void* arg){
@@ -259,6 +278,10 @@ void* send_board_thread(void* arg){
         sleep_ms(100); // Dormir 100ms (10 FPS)
 
         pthread_mutex_lock(&session->lock);
+        if (!session->active) {
+            pthread_mutex_unlock(&session->lock);
+            break;
+        }
         // 1. Prepara e envia o tabuleiro
         translate_board_to_session(board, session);
         send_board_to_client(session);
@@ -270,6 +293,7 @@ void* send_board_thread(void* arg){
 }
 
 int main(int argc, char *argv[]) {
+    signal(SIGPIPE, SIG_IGN);
     open_debug_file("server_debug.log");
     if(argc != 4) {
         debug("Usage: %s <levels_dir(str)> <max_sessions(int)> <nome_FIFO_de_registo(str)>\n", argv[0]);
@@ -382,6 +406,7 @@ int main(int argc, char *argv[]) {
                 current_level_idx++;
 
                 while(1){
+                    
                     session.active = 1;
 
                     // 9. Criar threads para o jogo, cuidado com a ordem!
@@ -421,6 +446,7 @@ int main(int argc, char *argv[]) {
                     for (int i = 0; i < game_board.n_ghosts; i++) {
                         pthread_join(ghost_tids[i], NULL);
                     }
+
                     free(ghost_tids);
 
                     pthread_join(board_tid, NULL);
@@ -428,51 +454,60 @@ int main(int argc, char *argv[]) {
                     // 12. Processar o resultado do jogo
                     result = *retval;
                     free(retval);
+
+                    // 12.1 Se o pacman chegou ao portal
                     if (result == NEXT_LEVEL) {
                         accumulated_points = game_board.pacmans[0].points;
+
+                        // Último nível concluído
                         if (current_level_idx == total_levels) {
-                            // Último nível concluído
                             pthread_mutex_lock(&session.lock);
                             session.victory = 1;
-                            translate_board_to_session(&game_board, &session);
-                            send_board_to_client(&session);
                             pthread_mutex_unlock(&session.lock);
+                            translate_board_to_session(&game_board, &session);// tem que enviar o tab final de vitória aqui porque só aqui 
+                            send_board_to_client(&session);// é que ele sabe se os níveis acabaram
                             break; // Sair do loop de níveis
+                        }
+
+                        // Preparar para o próximo nível
+                        if (current_level_idx != total_levels) {
+                            unload_level(&game_board);
+                            free(session.grid);
+                            session.grid = NULL;
                         }
                         break; // Carregar próximo nível
                     }
+
+                    // 12.2 Se o pacman morreu ou pediu para sair
                     if (result == QUIT_GAME) {
                         pthread_mutex_lock(&session.lock);
                         session.game_over = 1;
                         pthread_mutex_unlock(&session.lock);
+                        unload_level(&game_board);
+                        free(session.grid);
+                        session.grid = NULL;
                         break; // Sair do loop de níveis
                     }
-                }
-                if (current_level_idx != total_levels) {
-                    unload_level(&game_board);
-                    free(session.grid);
-                }
-            }
-            
-            if(session.game_over || session.victory) {
+                } //fim do while do nível
+            } //fim do if do .lvl
+
+            // Se o jogo acabou, sair do loop dos níveis
+            if(session.game_over || session.victory || result == QUIT_GAME) {
                 break;
             }
-        }
+        } //fim do while dos níveis
 
-        char buf_quit[2 * sizeof(char)];
-        int p = read(session.fd_req, &buf_quit, sizeof(buf_quit));
-        debug("Read %d bytes from client request pipe before quitting\n", p);
+        // 13. Limpeza
+        close(session.fd_req);
+        close(session.fd_notif);
 
-        if (p == 2){
-            // 13. Limpeza
-            unload_level(&game_board);
-            free(session.grid);
-            close(fd);
-            closedir(level_dir);
-            pthread_mutex_destroy(&session.lock);
-            unlink(server_fifo);   
-            close_debug_file(); 
-        }
+        closedir(level_dir);
+        pthread_mutex_destroy(&session.lock);
+
+        close(fd);
+        unlink(server_fifo);   
+
+        close_debug_file(); 
     }
 
     return 0;

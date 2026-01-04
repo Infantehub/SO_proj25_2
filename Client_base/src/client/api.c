@@ -121,6 +121,10 @@ void pacman_play(char command) {
     play_req_buffer[0] = OP_CODE_PLAY;
     play_req_buffer[1] = command;
 
+    if(command == 'Q'){
+        play_req_buffer[0] = OP_CODE_DISCONNECT;
+    }
+
     // 2. Enviar pedido de jogada ao servidor
     if (write(session.fd_req_pipe, &play_req_buffer, sizeof(play_req_buffer)) == -1) {
         debug("Failed to write play request to server\n");
@@ -128,20 +132,7 @@ void pacman_play(char command) {
 }
 
 int pacman_disconnect() {
-    //1. Enviar aviso de desconexão ao servidor
-
-    char exit_buf[2 * sizeof(char)];
-    exit_buf[0] = OP_CODE_DISCONNECT;
-    exit_buf[1] = 0; //Just padding
-
-    debug("Disconnecting from server...\n");
-    if (write(session.fd_req_pipe, &exit_buf, sizeof(exit_buf)) == -1) {
-        debug("Failed to write disconnect request to server\n");
-        return 1;
-    }
-    debug("Disconnect request sent to server\n");
-
-    //2. Fechar os pipes do cliente
+    //1. Fechar os pipes do cliente
     if (close(session.fd_req_pipe) == -1) {
         debug("Failed to close request pipe\n");
         return 1;
@@ -152,7 +143,7 @@ int pacman_disconnect() {
     }
     debug("Client pipes closed\n");
 
-    //3. Apagar os pipes do cliente
+    //2. Apagar os pipes do cliente
     if (unlink(session.req_pipe_path) == -1) {
         debug("Failed to unlink request pipe\n");
     }
@@ -160,7 +151,7 @@ int pacman_disconnect() {
         debug("Failed to unlink notification pipe\n");
     }
     debug("Client pipes unlinked\n");
-    close_debug_file();
+
     return 0;
 }
 
@@ -171,7 +162,7 @@ Board receive_board_update(void) {
     memset(&board, 0, sizeof(Board));
 
     // 1. Ler a atualização do tabuleiro do pipe de notificações
-    if(read_all(session.fd_notif_pipe, header, sizeof(header)) == -1) {
+    if(read_all(session.fd_notif_pipe, header, sizeof(header)) <= 0) {
         return board;
     }
     
@@ -200,7 +191,7 @@ Board receive_board_update(void) {
     }
 
     // 4. Ler os dados do tabuleiro do pipe de notificações
-    if (read_all(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) == -1) {
+    if (read_all(session.fd_notif_pipe, board.data, board.width * board.height * sizeof(char)) <= 0) {
         free(board.data);
         board.data = NULL;
         return board;

@@ -10,7 +10,6 @@
 *A resolver:*
     -por o cliente a ler os ficheiros .p (reutilizar a função read_pacman definida no Server_base)
     -verificar lógica de passagem de nível
-    -a main do cliente não está a chegar ao fim, prova-> os pipes não estão a ser apagados
     -verificar tamanho dos paths dos pipes com e sem /0
 
 *Estética e sentido:*

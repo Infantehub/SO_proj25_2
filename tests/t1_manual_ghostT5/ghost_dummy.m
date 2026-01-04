@@ -1,4 +1,4 @@
-PASSO 1
+PASSO 10
 POS 2 3
 T 5
 W
