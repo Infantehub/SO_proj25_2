@@ -8,42 +8,24 @@
 #include <signal.h>
 #include <errno.h>
 #include <dirent.h>
+#include <semaphore.h>
 
 #include "protocol.h"
 #include "debug.h"
 #include "server.h"
 
+sem_t server_semaphore;
+pthread_mutex_t server_mutex;
+char connectbuf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)][1000]; // buffer para pedidos de conexão
+int connect_count = 0; //TODO:check if correct
+
+char level_files_dirpath[128];
+int max_sessions;
+char server_fifo[MAX_PIPE_PATH_LENGTH];
+
+
 static inline int get_board_index(board_t* board, int x, int y) {
     return y * board->width + x;
-}
-
-// Só para inicializar o jogo (fictício)
-void init_session(GameSession *s) {
-    s->width = 5;
-    s->height = 5;
-    s->grid = malloc(s->width * s->height);
-    s->tempo = 10;
-    s->score = 0;
-    s->game_over = 0;
-    s->victory = 0;
-
-    // Encher com pontos
-    memset(s->grid, '.', s->width * s->height);
-
-    // Paredes nas bordas (exemplo simples)
-    for(int i=0; i<s->width; i++) {
-        s->grid[i] = 'W'; // Topo
-        s->grid[(s->height-1)*s->width + i] = 'W'; // Fundo
-    }
-    for(int i=0; i<s->height; i++) {
-        s->grid[i*s->width] = 'W'; // Esquerda
-        s->grid[i*s->width + (s->width-1)] = 'W'; // Direita
-    }
-
-    // Colocar Pacman no meio
-    s->pacman_x = s->width / 2;
-    s->pacman_y = s->height / 2;
-    s->grid[s->pacman_y * s->width + s->pacman_x] = 'C'; // 'C' é o Pacman
 }
 
 /*Esta tarefa é responsável por receber o input do cliente
@@ -159,7 +141,7 @@ int send_board_to_client(GameSession *session) {
 
     int p = 0;
     // 1. OP CODE
-    buffer[p++] = OP_CODE_BOARD; // Deve ser 4 no protocol.h
+    buffer[p++] = OP_CODE_BOARD;
 
     // 2. Inteiros (memcpy para segurança binária)
     memcpy(buffer + p, &session->width, sizeof(int)); p += sizeof(int);
@@ -292,41 +274,28 @@ void* send_board_thread(void* arg){
     return NULL;
 }
 
-int main(int argc, char *argv[]) {
-    signal(SIGPIPE, SIG_IGN);
-    open_debug_file("server_debug.log");
-    if(argc != 4) {
-        debug("Usage: %s <levels_dir(str)> <max_sessions(int)> <nome_FIFO_de_registo(str)>\n", argv[0]);
-        return 1;
-    }
+void *session_thread(void *arg) {
+    (void)arg;
+    while(1){
+        // 1. Esperar por pedido de conexão
+        sem_wait(&server_semaphore); // Esperar por slot disponível
 
-    // 1. Cria o pipe do servidor
-    char server_fifo[MAX_PIPE_PATH_LENGTH];
-    strncpy(server_fifo, argv[3], MAX_PIPE_PATH_LENGTH);
-    mkfifo(server_fifo, 0666);
+        pthread_mutex_lock(&server_mutex);
 
-    // 2. Abre para leitura
-    int fd = open(server_fifo, O_RDONLY);
-    if (fd == -1) {
-        debug("Failed to open server FIFO\n");
-        return 1;
-    }
-    
-    // 3. Espera por conexão de cliente
-    // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
-    char connectbuf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
-    ssize_t n = read(fd, &connectbuf, sizeof(connectbuf));
+        // 2. Tratar do pedido mais antigo
+        char connect_request[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
+        memcpy(connect_request, connectbuf[0], sizeof(connect_request));
 
-    if (n <= 0) {
-        debug("Failed to read connection request\n");
-        close(fd);
-        return 1;
-    }
+        // Deslocar os pedidos no buffer
+        for (int i = 1; i < connect_count; i++) {
+            memcpy(connectbuf[i - 1], connectbuf[i], sizeof(connectbuf[i]));
+        }
+        connect_count--;
 
-    char opcode = connectbuf[0];
-    if (opcode == OP_CODE_CONNECT && n==(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)) {
-        // 4. Inicializa sessão de jogo
-        debug("Client connected\n");
+        pthread_mutex_unlock(&server_mutex);
+
+        // 3. Processar o pedido de conexão
+        debug("Processing a new connection request in session thread\n");
         GameSession session;
         board_t game_board;
         memset(&session, 0, sizeof(session));
@@ -335,22 +304,21 @@ int main(int argc, char *argv[]) {
 
         // 5. Abrir pipes do cliente, por ordem que são abertos no api.c
         char req_path[MAX_PIPE_PATH_LENGTH], notif_path[MAX_PIPE_PATH_LENGTH];
-        memcpy(req_path, connectbuf + sizeof(char), MAX_PIPE_PATH_LENGTH);
-        memcpy(notif_path, connectbuf + sizeof(char) + MAX_PIPE_PATH_LENGTH * sizeof(char), MAX_PIPE_PATH_LENGTH);
+        memcpy(req_path, connect_request + sizeof(char), MAX_PIPE_PATH_LENGTH);
+        memcpy(notif_path, connect_request + sizeof(char) + MAX_PIPE_PATH_LENGTH * sizeof(char), MAX_PIPE_PATH_LENGTH);
 
+        debug("Notif pipe:%s\n", notif_path);
         session.fd_notif = open(notif_path, O_WRONLY);
         if (session.fd_notif == -1) {
             debug("Failed to open client request FIFO\n");
-            close(fd);
-            return 1;
+            return NULL;
         }
 
         session.fd_req = open(req_path, O_RDONLY);
         if (session.fd_req == -1) {
             debug("Failed to open client notification FIFO\n");
             close(session.fd_notif);
-            close(fd);
-            return 1;
+            return NULL;
         }
         debug("Client FIFOs opened\n");
 
@@ -362,13 +330,12 @@ int main(int argc, char *argv[]) {
             debug("Failed to send connection ACK to client\n");
             close(session.fd_req);
             close(session.fd_notif);
-            close(fd);
-            return 1;
+            return NULL;
         }
         debug("Connection ACK sent to client\n");
 
         int total_levels = 0;
-        DIR* count_dir = opendir(argv[1]);
+        DIR* count_dir = opendir(level_files_dirpath);
         struct dirent* count_entry;
         while ((count_entry = readdir(count_dir)) != NULL) {
             char *dot = strrchr(count_entry->d_name, '.');
@@ -380,10 +347,9 @@ int main(int argc, char *argv[]) {
         closedir(count_dir);
 
         // 7. Abre a diretoria
-
-        DIR* level_dir = opendir(argv[1]);
+        DIR* level_dir = opendir(level_files_dirpath);
         if (level_dir == NULL) {
-            debug("Failed to open directory: %s\n", argv[1]);
+            debug("Failed to open directory: %s\n", level_files_dirpath);
             return 0;
         }
 
@@ -399,7 +365,7 @@ int main(int argc, char *argv[]) {
 
             if (strcmp(dot, ".lvl") == 0) {
                 // 8. Carregar nível
-                if (load_level(&game_board, &session, entry->d_name, argv[1], accumulated_points) == -1) {
+                if (load_level(&game_board, &session, entry->d_name, level_files_dirpath, accumulated_points) == -1) {
                     debug("Failed to load level: %s\n", entry->d_name);
                     continue;
                 }
@@ -502,13 +468,90 @@ int main(int argc, char *argv[]) {
         close(session.fd_notif);
 
         closedir(level_dir);
-        pthread_mutex_destroy(&session.lock);
+        pthread_mutex_destroy(&session.lock);  
+    }
+    return NULL;
+}
 
-        close(fd);
-        unlink(server_fifo);   
+void* host_thread(void* arg) {
+    (void)arg;
 
-        close_debug_file(); 
+    // 1. Criar pipe do servidor
+    mkfifo(server_fifo, 0666);
+
+    // 2. Abre para leitura
+    int fd = open(server_fifo, O_RDONLY);
+
+    // 2.1 Abrir para escrita dummy para não receber EOF
+    int dummy_fd = open(server_fifo, O_WRONLY);
+
+    if (fd == -1 || dummy_fd == -1) {
+        debug("Failed to open server FIFO\n");
+        return NULL;
     }
 
+    // 3. Inicializa semáforo e buffer produtor-consumidor
+    sem_init(&server_semaphore, 0, 0); // começa a zeros, o passo 4. trata da capacidade
+    pthread_mutex_init(&server_mutex, NULL); //TODO: check for locks
+
+    // 4. Inicializar threads de sessão de jogo (consumidores)
+    for (int i = 0; i < max_sessions; i++) {
+        pthread_t sessions;
+        pthread_create(&sessions, NULL, session_thread, NULL);
+    }
+
+    while(1){
+        // 4. Espera por conexão de cliente
+        // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
+        int n = read(fd, &connectbuf[connect_count], sizeof(connectbuf[0]));
+
+        if (n <= 0) {
+            debug("Failed to read connection request\n");
+            close(fd);
+            return NULL;
+        }
+
+        char opcode = connectbuf[connect_count][0];
+        if (opcode == OP_CODE_CONNECT && n == (1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)) {
+            // 5. Coloca pedido na fila (buffer produtor-consumidor)
+            pthread_mutex_lock(&server_mutex);
+
+            sem_post(&server_semaphore);
+            connect_count++;
+
+            pthread_mutex_unlock(&server_mutex);
+        }
+
+    }
+
+    unlink(server_fifo);
+    close(fd);
+    pthread_mutex_destroy(&server_mutex);
+    sem_destroy(&server_semaphore);
+
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    signal(SIGPIPE, SIG_IGN);
+    open_debug_file("server_debug.log");
+    if(argc != 4) {
+        debug("Usage: %s <levels_dir(str)> <max_sessions(int)> <nome_FIFO_de_registo(str)>\n", argv[0]);
+        return 1;
+    }
+
+    strncpy(level_files_dirpath, argv[1], sizeof(level_files_dirpath) - 1);
+    level_files_dirpath[sizeof(level_files_dirpath) - 1] = '\0';
+
+    max_sessions = atoi(argv[2]);
+
+    strncpy(server_fifo, argv[3], sizeof(server_fifo) - 1);
+    server_fifo[sizeof(server_fifo) - 1] = '\0';
+
+    pthread_t host_tid;
+    pthread_create(&host_tid, NULL, host_thread, NULL);
+    pthread_join(host_tid, NULL);
+
+    close_debug_file();
     return 0;
 }
