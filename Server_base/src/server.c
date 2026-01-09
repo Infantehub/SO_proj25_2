@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,15 +15,79 @@
 #include "debug.h"
 #include "server.h"
 
+// VARIÁVEIS GLOBAIS --> tornar isto numa struct server_info_t 
 sem_t server_semaphore;
 pthread_mutex_t server_mutex;
 char connectbuf[512][(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)]; // buffer para pedidos de conexão
 int users_queue_count = 0; //TODO:check if correct
 
+GameSession **active_sessions = NULL;
+
 char level_files_dirpath[128];
 int max_sessions;
 char server_fifo[MAX_PIPE_PATH_LENGTH];
 
+volatile sig_atomic_t sigusr1_recebido = 0;
+
+// Estrutura auxiliar apenas para esta função
+typedef struct {
+    int id;    // Pode ser o indice ou socket_fd
+    int score;
+} ScoreEntry;
+
+/*Função auxiliar para tratar o sinal SIGUSR1*/
+void trata_sinal_usr1(int sinal) {
+    if (sinal == SIGUSR1) {
+        sigusr1_recebido = 1;
+        // A lógica pesada fica no main loop.
+    }
+}
+
+void gerar_top5_pontuacoes() {
+    FILE *f = fopen("top5_scores.txt", "w");
+    if (!f) return;
+
+    // Array temporário na stack para ordenar (evita mexer no array global)
+    ScoreEntry temp_list[max_sessions];
+    int count = 0;
+
+    // 1. Recolher apenas sessões ATIVAS
+    // Nota: Lemos sem lock específico de sessão para não parar o jogo. 
+    // Pode haver uma ligeira discrepância no score, mas é aceitável para "Live Stats".
+    for (int i = 0; i < max_sessions; i++) {
+        GameSession *s = active_sessions[i];
+        // Verifica se ponteiro existe E se a sessão está marcada como ativa
+        if (s != NULL && s->active) {
+            temp_list[count].id = s->fd_req; // Usamos o FD como ID único
+            temp_list[count].score = s->score;
+            count++;
+        }
+    }
+
+    // 2. Ordenar (Bubble Sort é rápido suficiente para < 100 elementos)
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = 0; j < count - i - 1; j++) {
+            if (temp_list[j].score < temp_list[j + 1].score) {
+                // Trocar
+                ScoreEntry temp = temp_list[j];
+                temp_list[j] = temp_list[j + 1];
+                temp_list[j + 1] = temp;
+            }
+        }
+    }
+
+    // 3. Escrever no ficheiro
+    fprintf(f, "--- TOP 5 JOGADORES (Total Ativos: %d) ---\n", count);
+    int limite = (count < 5) ? count : 5;
+    
+    for (int i = 0; i < limite; i++) {
+        fprintf(f, "%dº Lugar - ID: %d - Pontos: %d\n", 
+                i + 1, temp_list[i].id, temp_list[i].score);
+    }
+
+    fclose(f);
+    printf("Estatísticas geradas: %d jogadores listados.\n", count);
+}
 
 static inline int get_board_index(board_t* board, int x, int y) {
     return y * board->width + x;
@@ -130,6 +195,7 @@ void* input_handler_thread(void* arg){
     return (void*) retval;
 }
 
+/*Função para enviar o estado do tabuleiro para o cliente*/
 int send_board_to_client(GameSession *session) {
 
     int header_size = 1*sizeof(char) + 6 * sizeof(int); // OP + 6 inteiros
@@ -181,6 +247,7 @@ int send_board_to_client(GameSession *session) {
     return 0;
 }
 
+/*Função para traduzir o estado na estrutura do tabuleiro para a estrutura de sessão*/
 void translate_board_to_session(board_t *board, GameSession *session) {
     debug("Translating board to session format\n");
     // Assegurar que o grid da sessão está alocado
@@ -222,6 +289,7 @@ void translate_board_to_session(board_t *board, GameSession *session) {
 
 }
 
+/*Tarefa responsável pelo movimento independente dos monstros*/
 void* ghost_thread(void *arg) {
     ghost_thread_arg_t *ghost_arg = (ghost_thread_arg_t*) arg;
 
@@ -247,6 +315,7 @@ void* ghost_thread(void *arg) {
     return NULL;
 }
 
+/*Tarefa responsável pelo envio periódico do estado do tabuleiro para o cliente*/
 void* send_board_thread(void* arg){
     pacman_thread_arg_t *pac_arg = (pacman_thread_arg_t*) arg;
 
@@ -274,8 +343,10 @@ void* send_board_thread(void* arg){
     return NULL;
 }
 
+/*Tarefa responsável pelo jogo de cada cliente*/
 void *session_thread(void *arg) {
-    (void)arg;
+    GameSession *session = (GameSession *)arg;
+
     while(1){
         // 1. Esperar por pedido de conexão
         sem_wait(&server_semaphore); // Esperar por slot disponível
@@ -296,11 +367,13 @@ void *session_thread(void *arg) {
 
         // 3. Processar o pedido de conexão
         debug("Processing a new connection request in session thread\n");
-        GameSession session;
+        
+
         board_t game_board;
-        memset(&session, 0, sizeof(session));
-        session.active = 1;
-        pthread_mutex_init(&session.lock, NULL);
+        memset(session, 0, sizeof(GameSession));
+        memset(&game_board, 0, sizeof(game_board));
+        session->active = 1;
+        pthread_mutex_init(&session->lock, NULL);
 
         // 5. Abrir pipes do cliente, por ordem que são abertos no api.c
         char req_path[MAX_PIPE_PATH_LENGTH], notif_path[MAX_PIPE_PATH_LENGTH];
@@ -308,16 +381,16 @@ void *session_thread(void *arg) {
         memcpy(notif_path, connect_request + sizeof(char) + MAX_PIPE_PATH_LENGTH * sizeof(char), MAX_PIPE_PATH_LENGTH);
 
         debug("Notif pipe:%s\n", notif_path);
-        session.fd_notif = open(notif_path, O_WRONLY);
-        if (session.fd_notif == -1) {
+        session->fd_notif = open(notif_path, O_WRONLY);
+        if (session->fd_notif == -1) {
             debug("Failed to open client request FIFO\n");
             return NULL;
         }
 
-        session.fd_req = open(req_path, O_RDONLY);
-        if (session.fd_req == -1) {
+        session->fd_req = open(req_path, O_RDONLY);
+        if (session->fd_req == -1) {
             debug("Failed to open client notification FIFO\n");
-            close(session.fd_notif);
+            close(session->fd_notif);
             return NULL;
         }
         debug("Client FIFOs opened\n");
@@ -326,10 +399,10 @@ void *session_thread(void *arg) {
         // 6. Enviar Ack de conexão
         char ack[2 * sizeof(char)] = {OP_CODE_CONNECT, 0}; // Result 0 = OK
 
-        if(write(session.fd_notif, ack, 2 * sizeof(char)) == -1) {
+        if(write(session->fd_notif, ack, 2 * sizeof(char)) == -1) {
             debug("Failed to send connection ACK to client\n");
-            close(session.fd_req);
-            close(session.fd_notif);
+            close(session->fd_req);
+            close(session->fd_notif);
             return NULL;
         }
         debug("Connection ACK sent to client\n");
@@ -357,7 +430,7 @@ void *session_thread(void *arg) {
         int accumulated_points = 0;
         int current_level_idx = 0;
         int result;
-        while ((entry = readdir(level_dir)) != NULL && !session.game_over){
+        while ((entry = readdir(level_dir)) != NULL && !session->game_over){
             if (entry->d_name[0] == '.') continue;
 
             char *dot = strrchr(entry->d_name, '.');
@@ -365,7 +438,7 @@ void *session_thread(void *arg) {
 
             if (strcmp(dot, ".lvl") == 0) {
                 // 8. Carregar nível
-                if (load_level(&game_board, &session, entry->d_name, level_files_dirpath, accumulated_points) == -1) {
+                if (load_level(&game_board, session, entry->d_name, level_files_dirpath, accumulated_points) == -1) {
                     debug("Failed to load level: %s\n", entry->d_name);
                     continue;
                 }
@@ -373,7 +446,7 @@ void *session_thread(void *arg) {
 
                 while(1){
                     
-                    session.active = 1;
+                    session->active = 1;
 
                     // 9. Criar threads para o jogo, cuidado com a ordem!
                     pthread_t input_tid, board_tid;
@@ -382,7 +455,7 @@ void *session_thread(void *arg) {
                     // 9.1 Criar thread de envio do tabuleiro
                     pacman_thread_arg_t *board_arg = malloc(sizeof(pacman_thread_arg_t));
                     board_arg->board = &game_board;
-                    board_arg->game_session = &session;
+                    board_arg->game_session = session;
                     pthread_create(&board_tid, NULL, send_board_thread, board_arg);
 
                     // 9.2 Criar threads dos fantasmas
@@ -390,14 +463,14 @@ void *session_thread(void *arg) {
                         ghost_thread_arg_t *arg = malloc(sizeof(ghost_thread_arg_t));
                         arg->board = &game_board;
                         arg->ghost_index = i;
-                        arg->game_session = &session;
+                        arg->game_session = session;
                         pthread_create(&ghost_tids[i], NULL, ghost_thread, (void*) arg);
                     }
 
                     // 9.3 Criar thread do input do pacman
                     pacman_thread_arg_t *pac_arg = malloc(sizeof(pacman_thread_arg_t));
                     pac_arg->board = &game_board;
-                    pac_arg->game_session = &session;
+                    pac_arg->game_session = session;
                     pthread_create(&input_tid, NULL, input_handler_thread, (void *) pac_arg);
 
                     // 10. Esperar pela thread de input terminar
@@ -405,9 +478,9 @@ void *session_thread(void *arg) {
                     pthread_join(input_tid, (void**)&retval);
 
                     // 11. Parar o jogo
-                    pthread_mutex_lock(&session.lock);
-                    session.active = 0;
-                    pthread_mutex_unlock(&session.lock);
+                    pthread_mutex_lock(&session->lock);
+                    session->active = 0;
+                    pthread_mutex_unlock(&session->lock);
 
                     for (int i = 0; i < game_board.n_ghosts; i++) {
                         pthread_join(ghost_tids[i], NULL);
@@ -427,54 +500,60 @@ void *session_thread(void *arg) {
 
                         // Último nível concluído
                         if (current_level_idx == total_levels) {
-                            pthread_mutex_lock(&session.lock);
-                            session.victory = 1;
-                            pthread_mutex_unlock(&session.lock);
-                            translate_board_to_session(&game_board, &session);// tem que enviar o tab final de vitória aqui porque só aqui 
-                            send_board_to_client(&session);// é que ele sabe se os níveis acabaram
+                            pthread_mutex_lock(&session->lock);
+                            session->victory = 1;
+                            pthread_mutex_unlock(&session->lock);
+                            translate_board_to_session(&game_board, session);// tem que enviar o tab final de vitória aqui porque só aqui 
+                            send_board_to_client(session);// é que ele sabe se os níveis acabaram
                             break; // Sair do loop de níveis
                         }
 
                         // Preparar para o próximo nível
                         if (current_level_idx != total_levels) {
                             unload_level(&game_board);
-                            free(session.grid);
-                            session.grid = NULL;
+                            free(session->grid);
+                            session->grid = NULL;
                         }
                         break; // Carregar próximo nível
                     }
 
                     // 12.2 Se o pacman morreu ou pediu para sair
                     if (result == QUIT_GAME) {
-                        pthread_mutex_lock(&session.lock);
-                        session.game_over = 1;
-                        pthread_mutex_unlock(&session.lock);
+                        pthread_mutex_lock(&session->lock);
+                        session->game_over = 1;
+                        pthread_mutex_unlock(&session->lock);
                         unload_level(&game_board);
-                        free(session.grid);
-                        session.grid = NULL;
+                        free(session->grid);
+                        session->grid = NULL;
                         break; // Sair do loop de níveis
                     }
                 } //fim do while do nível
             } //fim do if do .lvl
 
             // Se o jogo acabou, sair do loop dos níveis
-            if(session.game_over || session.victory || result == QUIT_GAME) {
+            if(session->game_over || session->victory || result == QUIT_GAME) {
                 break;
             }
         } //fim do while dos níveis
 
         // 13. Limpeza
-        close(session.fd_req);
-        close(session.fd_notif);
+        close(session->fd_req);
+        close(session->fd_notif);
 
         closedir(level_dir);
-        pthread_mutex_destroy(&session.lock);  
+        pthread_mutex_destroy(&session->lock);  
     }
     return NULL;
 }
 
+/*Tarefa responsável pelo atendimento aos pedidos de conexão dos clientes*/
 void* host_thread(void* arg) {
     (void)arg;
+    // --- MUDANÇA 2: A host_thread decide escutar o sinal ---
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+    pthread_sigmask(SIG_UNBLOCK, &mask, NULL); // <--- AQUI!
 
     // 1. Criar pipe do servidor
     mkfifo(server_fifo, 0666);
@@ -497,22 +576,37 @@ void* host_thread(void* arg) {
     // 4. Inicializar threads de sessão de jogo (consumidores)
     for (int i = 0; i < max_sessions; i++) {
         pthread_t sessions;
-        pthread_create(&sessions, NULL, session_thread, NULL);
+        active_sessions[i] = malloc(sizeof(GameSession));
+        pthread_create(&sessions, NULL, session_thread, (void*)active_sessions[i]);
     }
 
     char temp_buf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
 
     while(1){
+
+        // VERIFICAÇÃO DA FLAG
+        if (sigusr1_recebido) {
+            printf("Sinal SIGUSR1 detetado. A gerar estatísticas...\n");
+            gerar_top5_pontuacoes(); // Função que crias no passo 5
+            sigusr1_recebido = 0;    // Reset da flag
+        }
+
         // 4. Espera por conexão de cliente
         // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
         memset(temp_buf, 0, sizeof(temp_buf));
 
         int n = read(fd, &temp_buf, sizeof(temp_buf));
 
-        if (n <= 0) {
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue; // Foi só o sinal, volta ao início do while para verificar a flag sigusr1_recebido
+            }
             debug("Failed to read connection request\n");
             close(fd);
             return NULL;
+        }
+        if (n == 0) {
+            continue; // Ignorar ou tratar desconexão do pipe
         }
 
         char opcode = temp_buf[0];
@@ -529,6 +623,12 @@ void* host_thread(void* arg) {
 
     }
 
+    // 6. Limpeza
+    for (int i = 0; i < max_sessions; i++) {
+        free(active_sessions[i]);
+    }
+    free(active_sessions);
+    close(dummy_fd);
     unlink(server_fifo);
     close(fd);
     pthread_mutex_destroy(&server_mutex);
@@ -539,6 +639,26 @@ void* host_thread(void* arg) {
 
 int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
+
+    // --- MUDANÇA 1: Bloquear SIGUSR1 no processo principal ---
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+    // Isto garante que o main (e quem ele criar) ignora o sinal por defeito
+    pthread_sigmask(SIG_BLOCK, &mask, NULL); 
+
+    // Configurar o handler (podes manter isto aqui ou antes)
+    struct sigaction sa;
+    sa.sa_handler = trata_sinal_usr1;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; 
+    sigaction(SIGUSR1, &sa, NULL);
+
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        perror("Erro ao configurar SIGUSR1");
+        return 1;
+    }
+
     open_debug_file("server_debug.log");
     if(argc != 4) {
         debug("Usage: %s <levels_dir(str)> <max_sessions(int)> <nome_FIFO_de_registo(str)>\n", argv[0]);
@@ -549,6 +669,12 @@ int main(int argc, char *argv[]) {
     level_files_dirpath[sizeof(level_files_dirpath) - 1] = '\0';
 
     max_sessions = atoi(argv[2]);
+    active_sessions = calloc(max_sessions, sizeof(GameSession*));
+
+    if (active_sessions == NULL) {
+        perror("Erro ao alocar memória para lista de sessões");
+        return 1;
+    }
 
     strncpy(server_fifo, argv[3], sizeof(server_fifo) - 1);
     server_fifo[sizeof(server_fifo) - 1] = '\0';

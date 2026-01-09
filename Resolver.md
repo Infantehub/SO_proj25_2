@@ -15,6 +15,13 @@
     -A variável game_over está com um uso estranho... game over acontece só queando perde ou também quando ganha? quando deve ser ativada?
     -rever os sleeps e os tempos
 
+
+    -pôr uma structure no server com as cenas globais para melhor compactação
+    -usar mallocs, reallocs e callocs para as infos dos clientes
+    -não usar fprintf no server, talvez write no stdout
+    -para controlar o fecho do servidor correto, ele deve receber o ctrl+c e proceder ao fecho
+    -usar write em vez de fprintf aquando se escreve para o ficheiro de topscores
+
 *Estética e sentido:*
     -as funções devem retornar 1 se der erro ou 0 se der certo, caso exceçoes
     -escrever breve descrição para cada função, bem como os seus passos(//1. etc)
