@@ -16,8 +16,8 @@
 
 sem_t server_semaphore;
 pthread_mutex_t server_mutex;
-char connectbuf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)][1000]; // buffer para pedidos de conexão
-int connect_count = 0; //TODO:check if correct
+char connectbuf[512][(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)]; // buffer para pedidos de conexão
+int users_queue_count = 0; //TODO:check if correct
 
 char level_files_dirpath[128];
 int max_sessions;
@@ -287,10 +287,10 @@ void *session_thread(void *arg) {
         memcpy(connect_request, connectbuf[0], sizeof(connect_request));
 
         // Deslocar os pedidos no buffer
-        for (int i = 1; i < connect_count; i++) {
+        for (int i = 1; i < users_queue_count; i++) {
             memcpy(connectbuf[i - 1], connectbuf[i], sizeof(connectbuf[i]));
         }
-        connect_count--;
+        users_queue_count--;
 
         pthread_mutex_unlock(&server_mutex);
 
@@ -500,10 +500,14 @@ void* host_thread(void* arg) {
         pthread_create(&sessions, NULL, session_thread, NULL);
     }
 
+    char temp_buf[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
+
     while(1){
         // 4. Espera por conexão de cliente
         // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
-        int n = read(fd, &connectbuf[connect_count], sizeof(connectbuf[0]));
+        memset(temp_buf, 0, sizeof(temp_buf));
+
+        int n = read(fd, &temp_buf, sizeof(temp_buf));
 
         if (n <= 0) {
             debug("Failed to read connection request\n");
@@ -511,13 +515,14 @@ void* host_thread(void* arg) {
             return NULL;
         }
 
-        char opcode = connectbuf[connect_count][0];
+        char opcode = temp_buf[0];
         if (opcode == OP_CODE_CONNECT && n == (1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)) {
             // 5. Coloca pedido na fila (buffer produtor-consumidor)
             pthread_mutex_lock(&server_mutex);
 
+            memcpy(connectbuf[users_queue_count], temp_buf, sizeof(connectbuf[0]));
             sem_post(&server_semaphore);
-            connect_count++;
+            users_queue_count++;
 
             pthread_mutex_unlock(&server_mutex);
         }
