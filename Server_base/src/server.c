@@ -15,11 +15,11 @@
 #include "debug.h"
 #include "server.h"
 
-// VARIÁVEIS GLOBAIS --> tornar isto numa struct server_info_t 
+// VARIÁVEIS GLOBAIS 
 sem_t server_semaphore;
 pthread_mutex_t server_mutex;
 char connectbuf[512][(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)]; // buffer para pedidos de conexão
-int users_queue_count = 0; //TODO:check if correct
+int users_queue_count = 0; // número de pedidos na fila
 
 GameSession **active_sessions = NULL;
 
@@ -28,10 +28,11 @@ int max_sessions;
 char server_fifo[MAX_PIPE_PATH_LENGTH];
 
 volatile sig_atomic_t sigusr1_recebido = 0;
+volatile sig_atomic_t terminar_servidor = 0;
 
-// Estrutura auxiliar apenas para esta função
+// Estrutura auxiliar apenas para gerar o top 5
 typedef struct {
-    int id;    // Pode ser o indice ou socket_fd
+    int id;    // Identificador do jogador
     int score;
 } ScoreEntry;
 
@@ -43,6 +44,14 @@ void trata_sinal_usr1(int sinal) {
     }
 }
 
+/*Função auxiliar para tratar o sinal SIGINT*/
+void trata_sinal_int(int sinal) {
+    if (sinal == SIGINT) {
+        terminar_servidor = 1; // Ativa a flag de saída
+    }
+}
+
+/*Função para gerar o ficheiro de top 5 pontuações*/
 void gerar_top5_pontuacoes() {
     FILE *f = fopen("top5_scores.txt", "w");
     if (!f) return;
@@ -52,8 +61,6 @@ void gerar_top5_pontuacoes() {
     int count = 0;
 
     // 1. Recolher apenas sessões ATIVAS
-    // Nota: Lemos sem lock específico de sessão para não parar o jogo. 
-    // Pode haver uma ligeira discrepância no score, mas é aceitável para "Live Stats".
     for (int i = 0; i < max_sessions; i++) {
         GameSession *s = active_sessions[i];
         // Verifica se ponteiro existe E se a sessão está marcada como ativa
@@ -86,7 +93,7 @@ void gerar_top5_pontuacoes() {
     }
 
     fclose(f);
-    printf("Estatísticas geradas: %d jogadores listados.\n", count);
+    debug("Estatísticas geradas: %d jogadores listados.\n", count);
 }
 
 static inline int get_board_index(board_t* board, int x, int y) {
@@ -131,7 +138,7 @@ void* input_handler_thread(void* arg){
             pthread_mutex_unlock(&session->lock);
             break;
         }
-        if (n == 0) { //Pipe fechado -> monstro matou pacman entre passos 1 e 2
+        if (n == 0) { //Pipe fechado - cliente desconectou
             debug("Client request pipe closed\n");
             pthread_mutex_lock(&session->lock);
             session->active = 0;
@@ -169,7 +176,7 @@ void* input_handler_thread(void* arg){
 
             int result = move_pacman(board, 0, &play);
             
-            pthread_rwlock_unlock(&board->state_lock); // Já acabámos de mexer no tabuleiro, podemos destrancar
+            pthread_rwlock_unlock(&board->state_lock); // Já acabámos de mexer no tabuleiro, destrancar
 
             if (result == REACHED_PORTAL) {
                 *retval = NEXT_LEVEL;
@@ -208,8 +215,7 @@ int send_board_to_client(GameSession *session) {
     int p = 0;
     // 1. OP CODE
     buffer[p++] = OP_CODE_BOARD;
-
-    // 2. Inteiros (memcpy para segurança binária)
+    // 2. Ler dados do cabeçalho
     memcpy(buffer + p, &session->width, sizeof(int)); p += sizeof(int);
     memcpy(buffer + p, &session->height, sizeof(int)); p += sizeof(int);
     memcpy(buffer + p, &session->tempo, sizeof(int)); p += sizeof(int);
@@ -250,6 +256,7 @@ int send_board_to_client(GameSession *session) {
 /*Função para traduzir o estado na estrutura do tabuleiro para a estrutura de sessão*/
 void translate_board_to_session(board_t *board, GameSession *session) {
     debug("Translating board to session format\n");
+
     // Assegurar que o grid da sessão está alocado
     if (!session->grid) {
         session->grid = malloc(board->width * board->height);
@@ -309,6 +316,7 @@ void* ghost_thread(void *arg) {
             break;
         }
         
+        // 1. Mover monstro
         move_ghost(board, ghost_ind, &ghost->moves[ghost->current_move%ghost->n_moves]);
         pthread_rwlock_unlock(&board->state_lock);
     }
@@ -349,7 +357,7 @@ void *session_thread(void *arg) {
 
     while(1){
         // 1. Esperar por pedido de conexão
-        sem_wait(&server_semaphore); // Esperar por slot disponível
+        sem_wait(&server_semaphore); // Esperar por thread de sessão disponível
 
         pthread_mutex_lock(&server_mutex);
 
@@ -357,7 +365,7 @@ void *session_thread(void *arg) {
         char connect_request[(1 + 2 * MAX_PIPE_PATH_LENGTH) * sizeof(char)];
         memcpy(connect_request, connectbuf[0], sizeof(connect_request));
 
-        // Deslocar os pedidos no buffer
+        // 3. Deslocar os pedidos no buffer
         for (int i = 1; i < users_queue_count; i++) {
             memcpy(connectbuf[i - 1], connectbuf[i], sizeof(connectbuf[i]));
         }
@@ -365,10 +373,7 @@ void *session_thread(void *arg) {
 
         pthread_mutex_unlock(&server_mutex);
 
-        // 3. Processar o pedido de conexão
-        debug("Processing a new connection request in session thread\n");
-        
-
+        // 4. Processar o pedido de conexão
         board_t game_board;
         memset(session, 0, sizeof(GameSession));
         memset(&game_board, 0, sizeof(game_board));
@@ -549,11 +554,12 @@ void *session_thread(void *arg) {
 /*Tarefa responsável pelo atendimento aos pedidos de conexão dos clientes*/
 void* host_thread(void* arg) {
     (void)arg;
-    // --- MUDANÇA 2: A host_thread decide escutar o sinal ---
+    // A host_thread decide escutar o sinal
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
-    pthread_sigmask(SIG_UNBLOCK, &mask, NULL); // <--- AQUI!
+    sigaddset(&mask, SIGINT);
+    pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
 
     // 1. Criar pipe do servidor
     mkfifo(server_fifo, 0666);
@@ -571,9 +577,9 @@ void* host_thread(void* arg) {
 
     // 3. Inicializa semáforo e buffer produtor-consumidor
     sem_init(&server_semaphore, 0, 0); // começa a zeros, o passo 4. trata da capacidade
-    pthread_mutex_init(&server_mutex, NULL); //TODO: check for locks
+    pthread_mutex_init(&server_mutex, NULL); 
 
-    // 4. Inicializar threads de sessão de jogo (consumidores)
+    // 4. Inicializar threads de sessão de jogo
     for (int i = 0; i < max_sessions; i++) {
         pthread_t sessions;
         active_sessions[i] = malloc(sizeof(GameSession));
@@ -587,9 +593,11 @@ void* host_thread(void* arg) {
         // VERIFICAÇÃO DA FLAG
         if (sigusr1_recebido) {
             printf("Sinal SIGUSR1 detetado. A gerar estatísticas...\n");
-            gerar_top5_pontuacoes(); // Função que crias no passo 5
+            gerar_top5_pontuacoes();
             sigusr1_recebido = 0;    // Reset da flag
         }
+        // Verificar se pediram para sair antes de entrar no read
+        if (terminar_servidor) break;
 
         // 4. Espera por conexão de cliente
         // Protocolo connect: OP(1) + PipeReq(40) + PipeNotif(40) + 2(\0) = 81 bytes
@@ -599,7 +607,7 @@ void* host_thread(void* arg) {
 
         if (n < 0) {
             if (errno == EINTR) {
-                continue; // Foi só o sinal, volta ao início do while para verificar a flag sigusr1_recebido
+                continue; // Foi o sinal, volta ao início do while para verificar a flag sigusr1_recebido
             }
             debug("Failed to read connection request\n");
             close(fd);
@@ -627,7 +635,7 @@ void* host_thread(void* arg) {
     for (int i = 0; i < max_sessions; i++) {
         free(active_sessions[i]);
     }
-    free(active_sessions);
+    
     close(dummy_fd);
     unlink(server_fifo);
     close(fd);
@@ -640,19 +648,27 @@ void* host_thread(void* arg) {
 int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
-    // --- MUDANÇA 1: Bloquear SIGUSR1 no processo principal ---
+    // --- Bloquear SIGUSR1 no processo principal ---
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGINT);
     // Isto garante que o main (e quem ele criar) ignora o sinal por defeito
     pthread_sigmask(SIG_BLOCK, &mask, NULL); 
 
-    // Configurar o handler (podes manter isto aqui ou antes)
+    // --- Configurar SIGUSR1 ---
     struct sigaction sa;
     sa.sa_handler = trata_sinal_usr1;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0; 
     sigaction(SIGUSR1, &sa, NULL);
+
+    // --- Configurar SIGINT (Ctrl+C) ---
+    struct sigaction sa_int;
+    sa_int.sa_handler = trata_sinal_int; // A nova função
+    sigemptyset(&sa_int.sa_mask);
+    sa_int.sa_flags = 0; // Importante: SEM SA_RESTART para interromper o read
+    sigaction(SIGINT, &sa_int, NULL);
 
     if (sigaction(SIGUSR1, &sa, NULL) == -1) {
         perror("Erro ao configurar SIGUSR1");
